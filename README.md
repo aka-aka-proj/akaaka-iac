@@ -1,10 +1,10 @@
 # akaaka-iac
 
-AkaAka 專案的 Infrastructure as Code（Terraform）。  
-負責建立並管理所有雲端基礎設施，是整個發版鏈的第一層。
+AkaAka 專案的資料層基礎設施設定倉庫。  
+本 repo 目前以 **Supabase + Vercel** 為唯一部署主流程，不使用 AWS。
 
 ```
-IaC (本 repo) ──► Backend ──► Frontend
+IaC (本 repo, Supabase) -> Backend -> Frontend (Vercel)
 ```
 
 ---
@@ -13,22 +13,15 @@ IaC (本 repo) ──► Backend ──► Frontend
 
 ```
 .
-├── .github/workflows/
-│   ├── iac-ci.yml          # PR CI: fmt / validate / plan
-│   └── iac-cd.yml          # main CD: staging apply → production apply（含人工審核）
-├── docs/
-│   └── release-order.md    # 整體發版順序說明
-└── terraform/
-    ├── versions.tf          # Terraform 版本與 Provider 宣告
-    ├── variables.tf         # 輸入變數定義
-    ├── outputs.tf           # 輸出值（供後續層使用）
-    ├── main.tf              # 主要資源宣告（module 呼叫）
-    ├── .gitignore
-    └── envs/
-        ├── staging/
-        │   └── terraform.tfvars
-        └── production/
-            └── terraform.tfvars
+|-- .github/workflows/
+|   |-- iac-ci.yml          # PR CI: 檢查 supabase/migrations 與 supabase/functions
+|   `-- iac-cd.yml          # main CD: supabase db push -> deploy functions
+|-- docs/
+|   `-- release-order.md    # 整體發版順序說明
+|-- supabase/
+|   |-- migrations/         # SQL migrations
+|   `-- functions/          # Supabase Edge Functions
+`-- terraform/              # Legacy (非主部署流程，僅保留歷史參考)
 ```
 
 ---
@@ -37,113 +30,59 @@ IaC (本 repo) ──► Backend ──► Frontend
 
 ### PR CI（`iac-ci.yml`）
 
-觸發條件：`terraform/**` 有變更的 PR 到 main
+觸發條件：PR 到 `main` 且變更包含：
+- `supabase/migrations/**`
+- `supabase/functions/**`
 
-| Job | 說明 |
-|-----|------|
-| `fmt` | `terraform fmt -check -recursive` |
-| `validate` | `terraform validate`（local backend，不需憑證） |
-| `plan-staging` | 對 staging 執行 plan，結果自動貼回 PR comment |
+檢查內容：
+- `supabase/migrations` 路徑存在，且 migration 檔名符合 `YYYYMMDDHHMMSS_description.sql`
+- `supabase/functions` 路徑存在，且每個 function 目錄至少有 `index.ts` 或 `index.js`
 
 ### Main CD（`iac-cd.yml`）
 
-觸發條件：`terraform/**` 有變更合併進 main，或手動觸發
+觸發條件：
+- push 到 `main` 且變更包含 `supabase/migrations/**` 或 `supabase/functions/**`
+- 或手動 `workflow_dispatch`
 
-| Job | 說明 | 審核 |
-|-----|------|------|
-| `apply-staging` | 自動 apply staging | 無 |
-| `apply-production` | apply production | **GitHub Environment 人工審核** |
-
----
-
-## 初始設定清單
-
-在 GitHub Repo Settings 完成以下設定後，CI/CD 即可正常運作：
-
-### 1. GitHub Environments
-
-至 **Settings → Environments** 建立：
-
-| Environment | Protection Rules |
-|-------------|-----------------|
-| `staging` | （選填）可設 required reviewers 或 wait timer |
-| `production` | **必要**：Required reviewers（至少 1 人） |
-
-### 2. GitHub Secrets（依 Environment）
-
-#### Environment: `staging`
-
-| Secret 名稱 | 說明 |
-|-------------|------|
-| `AWS_ROLE_ARN_STAGING` | Staging 用 IAM Role ARN（OIDC）<br>例：`arn:aws:iam::123456789012:role/github-actions-staging` |
-| `TF_STATE_BUCKET_STAGING` | Staging Terraform state S3 bucket 名稱 |
-
-#### Environment: `production`
-
-| Secret 名稱 | 說明 |
-|-------------|------|
-| `AWS_ROLE_ARN_PRODUCTION` | Production 用 IAM Role ARN（OIDC）<br>例：`arn:aws:iam::987654321098:role/github-actions-production` |
-| `TF_STATE_BUCKET_PRODUCTION` | Production Terraform state S3 bucket 名稱 |
-
-### 3. GitHub Variables（Repo 層級）
-
-| Variable 名稱 | 說明 | 預設值 |
-|--------------|------|--------|
-| `AWS_REGION` | 部署目標 AWS Region | `ap-northeast-1` |
-
-### 4. AWS OIDC 設定
-
-在 AWS IAM 建立 OIDC Identity Provider 並設定對應 Role：
-
-```hcl
-# 範例：允許 GitHub Actions 承擔此 Role
-data "aws_iam_policy_document" "github_actions_assume" {
-  statement {
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-    principals {
-      type        = "Federated"
-      identifiers = ["arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"]
-    }
-    condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:aka-aka-proj/akaaka-iac:*"]
-    }
-  }
-}
-```
-
-參考：[GitHub 官方 OIDC 文件](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)
+部署順序：
+1. `supabase db push`
+2. 逐一 deploy `supabase/functions/*` 下的 functions
 
 ---
 
-## 本地開發
+## GitHub Secrets 設定
+
+請在 Repo `Settings -> Secrets and variables -> Actions` 建立以下 Secrets：
+
+| Secret 名稱 | 必要性 | 用途 |
+|-------------|--------|------|
+| `SUPABASE_ACCESS_TOKEN` | 必填 | Supabase CLI 驗證 |
+| `SUPABASE_PROJECT_REF` | 必填 | 指定部署目標 Supabase 專案 |
+| `SUPABASE_DB_PASSWORD` | 選填 | `supabase db push` 在需要密碼時使用 |
+
+---
+
+## 本地開發（Supabase）
 
 ```bash
-# 安裝 Terraform（建議使用 tfenv 管理版本）
-tfenv install 1.9.5
-tfenv use 1.9.5
-
-# 初始化 staging 環境（需設定 AWS 憑證）
-cd terraform
-terraform init \
-  -backend-config="bucket=<your-staging-bucket>" \
-  -backend-config="key=akaaka/staging/terraform.tfstate" \
-  -backend-config="region=ap-northeast-1"
-
-# 格式化（PR 前必做）
-terraform fmt -recursive
-
-# 驗證
-terraform validate
-
-# Plan
-terraform plan -var-file="envs/staging/terraform.tfvars"
+npm i -g supabase
+supabase login
+supabase link --project-ref <your-project-ref>
+supabase db push
+supabase functions deploy <function-name> --project-ref <your-project-ref>
 ```
+
+---
+
+## Legacy 說明
+
+`terraform/` 目錄保留舊版內容供歷史追蹤，不是現行部署管線。  
+目前正式流程僅支援 Supabase（資料層）與 Vercel（前端託管）。
 
 ---
 
 ## 相關文件
 
 - [整體發版順序](./docs/release-order.md)
-- [Terraform 官方文件](https://developer.hashicorp.com/terraform/docs)
+- [Supabase CLI 文件](https://supabase.com/docs/reference/cli)
+- [Vercel 文件](https://vercel.com/docs)

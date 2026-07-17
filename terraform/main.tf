@@ -1,7 +1,6 @@
-# ─────────────────────────────────────────────
-# AkaAka IaC – main entrypoint
-# 在此宣告各 module 的呼叫；module 實作放在 modules/ 子目錄。
-# ─────────────────────────────────────────────
+# Legacy notice:
+# Terraform is no longer the primary deployment path for this repository.
+# Active deployment uses Supabase + Vercel workflows.
 
 # 範例 module 呼叫（尚未實作，取消註解後補上 modules/networking 即可啟用）：
 #
