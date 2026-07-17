@@ -1,163 +1,64 @@
-name: IaC CD – Apply (staging → production)
+name: Supabase IaC CD - main deploy
 
-# ─────────────────────────────────────────────────────────────────
-# 觸發條件：PR 合併進 main，且變更範圍在 terraform/ 目錄內。
-# 流程：staging apply（自動）→ production apply（需 GitHub Environment 手動審核）
-# ─────────────────────────────────────────────────────────────────
 on:
   push:
     branches:
       - main
     paths:
-      - "terraform/**"
+      - "supabase/migrations/**"
+      - "supabase/functions/**"
       - ".github/workflows/iac-cd.yml"
-
-  # 允許手動觸發，例如緊急回滾或首次部署
   workflow_dispatch:
-    inputs:
-      target_env:
-        description: "部署目標環境"
-        required: true
-        default: "staging"
-        type: choice
-        options:
-          - staging
-          - production
 
 permissions:
   contents: read
-  id-token:  write   # GitHub OIDC
 
-env:
-  TF_VERSION:       "1.9.5"
-  TF_WORKING_DIR:   terraform
-  AWS_REGION:       ${{ vars.AWS_REGION || 'ap-northeast-1' }}
-
-# ── 防止同時執行多個 CD，避免 state lock 競爭 ──────────────────
 concurrency:
-  group: iac-cd-${{ github.ref }}
-  cancel-in-progress: false   # 不強制取消，等待前一個完成
+  group: supabase-cd-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # ════════════════════════════════════════════════════════════════
-  # STAGING APPLY（自動，無需人工審核）
-  # ════════════════════════════════════════════════════════════════
-  apply-staging:
-    name: Apply → staging
+  deploy:
+    name: Push DB and deploy functions
     runs-on: ubuntu-latest
-    environment: staging   # GitHub Environment：可設定 deployment protection rules
-    # 手動觸發時，僅在選定 staging 時執行
-    if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.target_env == 'staging')
-
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: hashicorp/setup-terraform@v3
+      - name: Validate required secrets
+        run: |
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || { echo "Missing SUPABASE_ACCESS_TOKEN"; exit 1; }
+          [ -n "$SUPABASE_PROJECT_REF" ] || { echo "Missing SUPABASE_PROJECT_REF"; exit 1; }
+
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@v1
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          version: latest
 
-      - name: Configure AWS credentials via OIDC (staging)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_STAGING }}
-          aws-region:     ${{ env.AWS_REGION }}
+      - name: Link Supabase project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
 
-      - name: Terraform Init (staging)
-        working-directory: ${{ env.TF_WORKING_DIR }}
+      - name: Push database migrations
         run: |
-          terraform init \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_STAGING }}" \
-            -backend-config="key=akaaka/staging/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}"
+          if [ -n "$SUPABASE_DB_PASSWORD" ]; then
+            supabase db push --password "$SUPABASE_DB_PASSWORD"
+          else
+            supabase db push
+          fi
 
-      - name: Terraform Plan (staging)
-        working-directory: ${{ env.TF_WORKING_DIR }}
+      - name: Deploy Supabase Edge Functions
         run: |
-          terraform plan \
-            -var-file="envs/staging/terraform.tfvars" \
-            -out=staging.tfplan \
-            -no-color
-
-      - name: Terraform Apply (staging)
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply -auto-approve staging.tfplan
-
-      - name: Export staging outputs
-        id: tf-outputs
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          terraform output -json > staging_outputs.json
-          echo "outputs=$(cat staging_outputs.json)" >> $GITHUB_OUTPUT
-
-      # 將輸出值存為 Job Summary，方便後續 backend/frontend workflow 參照
-      - name: Write Job Summary
-        run: |
-          echo "## ✅ Staging Deploy Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Run    | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
-
-  # ════════════════════════════════════════════════════════════════
-  # PRODUCTION APPLY
-  # ► 依賴 staging 成功
-  # ► 使用 GitHub Environment "production" 的 Protection Rules
-  #   → 在 repo Settings > Environments > production 中設定：
-  #     • Required reviewers（人工核准）
-  #     • Wait timer（選填，例如 5 分鐘冷靜期）
-  #     • Deployment branches（限制為 main）
-  # ════════════════════════════════════════════════════════════════
-  apply-production:
-    name: Apply → production
-    runs-on: ubuntu-latest
-    needs: apply-staging
-    environment: production   # ← 這一行觸發 Environment Protection Rules（含人工審核）
-    # 手動觸發時，僅在選定 production 時執行（staging 已另行處理）
-    if: |
-      needs.apply-staging.result == 'success' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.target_env == 'production')
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS credentials via OIDC (production)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PRODUCTION }}
-          aws-region:     ${{ env.AWS_REGION }}
-
-      - name: Terraform Init (production)
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_PRODUCTION }}" \
-            -backend-config="key=akaaka/production/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}"
-
-      - name: Terraform Plan (production)
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          terraform plan \
-            -var-file="envs/production/terraform.tfvars" \
-            -out=production.tfplan \
-            -no-color
-
-      - name: Terraform Apply (production)
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply -auto-approve production.tfplan
-
-      - name: Write Job Summary
-        run: |
-          echo "## 🚀 Production Deploy Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Run    | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+          function_dirs="$(find supabase/functions -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)"
+          if [ -z "$function_dirs" ]; then
+            echo "No function directories under supabase/functions; skipping deploy."
+            exit 0
+          fi
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            fn="$(basename "$dir")"
+            echo "Deploying function: $fn"
+            supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
+          done <<< "$function_dirs"
