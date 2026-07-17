@@ -1,0 +1,13 @@
+# Terraform 本地快取與 plan 檔
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+*.tfstate
+*.tfstate.backup
+
+# 敏感變數檔（本地覆蓋用）
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
