@@ -101,8 +101,8 @@ Deno.serve(async (req: Request) => {
 
     let newStatus: string
     if (reg.status === 'cancellation_pending') {
-      // Approving cancellation -> cancelled, Rejecting cancellation -> approved
-      newStatus = action === 'approve' ? 'cancelled' : 'approved'
+      // Approving cancellation -> cancelled, Rejecting cancellation -> cancellation_rejected
+      newStatus = action === 'approve' ? 'cancelled' : 'cancellation_rejected'
     } else {
       // Approving registration -> approved, Rejecting registration -> rejected
       newStatus = action === 'approve' ? 'approved' : 'rejected'
