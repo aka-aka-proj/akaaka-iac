@@ -5,8 +5,8 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-type RoleStatus = 'general' | 'venue_pending' | 'venue_approved'
-const VALID_ROLES: RoleStatus[] = ['general', 'venue_pending', 'venue_approved']
+type RoleStatus = 'general' | 'venue_pending' | 'venue_approved' | 'admin'
+const VALID_ROLES: RoleStatus[] = ['general', 'venue_pending', 'venue_approved', 'admin']
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {

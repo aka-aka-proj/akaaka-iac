@@ -47,8 +47,14 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Unauthorized' }, 401)
     }
 
-    // Enforce admin role claim
-    if ((user.app_metadata?.role as string | undefined) !== 'admin') {
+    // Enforce admin role claim — check public.profiles.role_status
+    const { data: callerProfile, error: profileError } = await serviceClient
+      .from('profiles')
+      .select('role_status')
+      .eq('id', user.id)
+      .single()
+
+    if (profileError || callerProfile?.role_status !== 'admin') {
       return jsonResponse({ error: 'Forbidden: admin role required' }, 403)
     }
 
