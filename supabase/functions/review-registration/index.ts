@@ -49,8 +49,8 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'invalid', message: 'event_id, registration_id, and action are required' }, 400)
     }
 
-    if (action !== 'approve' && action !== 'reject') {
-      return jsonResponse({ error: 'invalid', message: 'action must be "approve" or "reject"' }, 400)
+    if (action !== 'approve' && action !== 'reject' && action !== 'reopen') {
+      return jsonResponse({ error: 'invalid', message: 'action must be "approve", "reject", or "reopen"' }, 400)
     }
 
     const serviceClient = createClient(supabaseUrl, serviceRoleKey)
@@ -82,7 +82,7 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'not_found', message: 'Registration not found' }, 404)
     }
 
-    if (reg.status !== 'pending' && reg.status !== 'cancellation_pending') {
+    if (reg.status !== 'pending' && reg.status !== 'cancellation_pending' && reg.status !== 'cancellation_rejected') {
       return jsonResponse({ error: 'invalid_status_transition', message: `Cannot ${action} a registration in '${reg.status}' status` }, 400)
     }
 
@@ -103,6 +103,8 @@ Deno.serve(async (req: Request) => {
     if (reg.status === 'cancellation_pending') {
       // Approving cancellation -> cancelled, Rejecting cancellation -> cancellation_rejected
       newStatus = action === 'approve' ? 'cancelled' : 'cancellation_rejected'
+    } else if (reg.status === 'cancellation_rejected' && action === 'reopen') {
+      newStatus = 'cancellation_pending'
     } else {
       // Approving registration -> approved, Rejecting registration -> rejected
       newStatus = action === 'approve' ? 'approved' : 'rejected'
