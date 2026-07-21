@@ -73,11 +73,15 @@ Deno.serve(async (req: Request) => {
     // 4. Block check (bidirectional)
     const { data: blocks } = await serviceClient
       .from('blocks')
-      .select('blocker_id')
+      .select('blocker_id, blocked_id')
       .or(`and(blocker_id.eq.${user.id},blocked_id.eq.${event.creator_id}),and(blocker_id.eq.${event.creator_id},blocked_id.eq.${user.id})`)
 
     if (blocks && blocks.length > 0) {
-      return jsonResponse({ error: 'blocked', message: 'You are unable to register for this event' }, 403)
+      const block = blocks[0]
+      const message = block.blocker_id === user.id 
+        ? 'You have blocked this event host.' 
+        : 'This event host has blocked you.'
+      return jsonResponse({ error: 'blocked', message }, 403)
     }
 
     // 5. Check existing active registration
