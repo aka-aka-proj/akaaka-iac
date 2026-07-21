@@ -82,12 +82,12 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'not_found', message: 'Registration not found' }, 404)
     }
 
-    if (reg.status !== 'pending') {
+    if (reg.status !== 'pending' && reg.status !== 'cancellation_pending') {
       return jsonResponse({ error: 'invalid_status_transition', message: `Cannot ${action} a registration in '${reg.status}' status` }, 400)
     }
 
-    // Capacity check for approve
-    if (action === 'approve' && event.max_capacity) {
+    // Capacity check for approve new registrations (ignore for cancellation approvals)
+    if (action === 'approve' && reg.status === 'pending' && event.max_capacity) {
       const { count: approvedCount } = await serviceClient
         .from('event_registrations')
         .select('id', { count: 'exact', head: true })
@@ -99,7 +99,14 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const newStatus = action === 'approve' ? 'approved' : 'rejected'
+    let newStatus: string
+    if (reg.status === 'cancellation_pending') {
+      // Approving cancellation -> cancelled, Rejecting cancellation -> approved
+      newStatus = action === 'approve' ? 'cancelled' : 'approved'
+    } else {
+      // Approving registration -> approved, Rejecting registration -> rejected
+      newStatus = action === 'approve' ? 'approved' : 'rejected'
+    }
 
     const { data: updated, error: updateError } = await serviceClient
       .from('event_registrations')

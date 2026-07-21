@@ -71,10 +71,13 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'invalid_status', message: 'Cannot cancel a rejected registration' }, 400)
     }
 
-    // Set status to cancelled — the DB trigger will handle waitlist promotion
+    // Set status to cancellation_pending if already approved, otherwise cancelled
+    const newStatus = reg.status === 'approved' ? 'cancellation_pending' : 'cancelled'
+
+    // Set status — the DB trigger will handle waitlist promotion only for 'cancelled'
     const { error: updateError } = await serviceClient
       .from('event_registrations')
-      .update({ status: 'cancelled' })
+      .update({ status: newStatus })
       .eq('id', reg.id)
 
     if (updateError) {
