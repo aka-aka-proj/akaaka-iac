@@ -127,15 +127,21 @@ Deno.serve(async (req: Request) => {
           )
         }
 
-        // Pipe the streaming response back with model name header
-        return new Response(aiResponse.body, {
+        // Wrap the stream to prepend model metadata as first SSE event
+        const encoder = new TextEncoder()
+        const modelEvent = encoder.encode(`data: ${JSON.stringify({ type: 'meta', model: usedModel })}\n\n`)
+        const { readable, writable } = new TransformStream()
+        const writer = writable.getWriter()
+        writer.write(modelEvent).then(() => {
+          aiResponse.body!.pipeTo(writable).catch(() => {})
+        })
+
+        return new Response(readable, {
           headers: {
             ...corsHeaders,
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
-            'Access-Control-Expose-Headers': 'X-Model-Used',
-            'X-Model-Used': usedModel,
           },
         })
       }
