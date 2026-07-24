@@ -6,16 +6,6 @@ const corsHeaders = {
 }
 
 const MODEL_LIST = [
-  'nvidia/nemotron-3-ultra-550b-a55b:free',
-  'nvidia/nemotron-3-super-120b-a12b:free',
-  'poolside/laguna-m.1:free',
-  'cohere/north-mini-code:free',
-  'poolside/laguna-xs-2.1:free',
-  'nvidia/nemotron-3-nano-30b-a3b:free',
-  'poolside/laguna-s-2.1:free',
-  'openai/gpt-oss-20b:free',
-  'deepseek/deepseek-v4-flash',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
   'cognitivecomputations/dolphin-mistral-24b-venice-edition',
 ]
 
