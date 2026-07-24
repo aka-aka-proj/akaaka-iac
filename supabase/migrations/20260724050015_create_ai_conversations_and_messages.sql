@@ -3,7 +3,6 @@ CREATE TABLE IF NOT EXISTS public.ai_conversations (
   id UUID NOT NULL DEFAULT gen_random_uuid(),
   character_id UUID NOT NULL REFERENCES public.ai_characters(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT ai_conversations_pkey PRIMARY KEY (id)
 );
 
@@ -27,7 +26,6 @@ DECLARE
   char_record RECORD;
   latest_chat RECORD;
   new_conv_id UUID;
-  msg_data JSONB;
   msg_item RECORD;
 BEGIN
   FOR char_record IN SELECT DISTINCT character_id FROM public.ai_chats LOOP
@@ -39,8 +37,8 @@ BEGIN
     LIMIT 1;
 
     -- 建立 conversation
-    INSERT INTO public.ai_conversations (character_id, created_at, updated_at)
-    VALUES (char_record.character_id, latest_chat.created_at, latest_chat.created_at)
+    INSERT INTO public.ai_conversations (character_id, created_at)
+    VALUES (char_record.character_id, latest_chat.created_at)
     RETURNING id INTO new_conv_id;
 
     -- 逐筆訊息插入 ai_messages
