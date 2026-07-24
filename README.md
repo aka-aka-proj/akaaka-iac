@@ -1,7 +1,7 @@
 # akaaka-iac
 
 AkaAka 專案的資料層基礎設施設定倉庫。  
-本 repo 目前以 **Supabase + Vercel** 為唯一部署主流程，不使用 AWS。
+本 repo 目前以 **Supabase + Vercel** 為唯一部署主流程
 
 ```
 IaC (本 repo, Supabase) -> Backend -> Frontend (Vercel)
@@ -21,7 +21,6 @@ IaC (本 repo, Supabase) -> Backend -> Frontend (Vercel)
 |-- supabase/
 |   |-- migrations/         # SQL migrations
 |   `-- functions/          # Supabase Edge Functions
-`-- terraform/              # Legacy (非主部署流程，僅保留歷史參考)
 ```
 
 ---
@@ -71,13 +70,6 @@ supabase link --project-ref <your-project-ref>
 supabase db push
 supabase functions deploy <function-name> --project-ref <your-project-ref>
 ```
-
----
-
-## Legacy 說明
-
-`terraform/` 目錄保留舊版內容供歷史追蹤，不是現行部署管線。  
-目前正式流程僅支援 Supabase（資料層）與 Vercel（前端託管）。
 
 ---
 
