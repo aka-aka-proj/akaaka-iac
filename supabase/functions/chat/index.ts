@@ -102,7 +102,9 @@ Deno.serve(async (req: Request) => {
     let lastError: string | null = null
     let usedModel = ''
 
-    for (const model of MODEL_LIST) {
+    const shuffledList = [...MODEL_LIST].sort(() => Math.random() - 0.5);
+
+    for (const model of shuffledList) {
       const aiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers,
@@ -125,13 +127,14 @@ Deno.serve(async (req: Request) => {
           )
         }
 
-        // Pipe the streaming response back
+        // Pipe the streaming response back with model name header
         return new Response(aiResponse.body, {
           headers: {
             ...corsHeaders,
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
+            'X-Model-Used': usedModel,
           },
         })
       }
