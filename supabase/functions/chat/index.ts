@@ -134,6 +134,7 @@ Deno.serve(async (req: Request) => {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
+            'Access-Control-Expose-Headers': 'X-Model-Used',
             'X-Model-Used': usedModel,
           },
         })
