@@ -127,16 +127,7 @@ Deno.serve(async (req: Request) => {
           )
         }
 
-        // Prepend model metadata as first SSE event using TransformStream
-        const encoder = new TextEncoder()
-        const modelEvent = encoder.encode(`data: ${JSON.stringify({ type: 'meta', model: usedModel })}\n\n`)
-        const { readable, writable } = new TransformStream()
-        const writer = writable.getWriter()
-        await writer.write(modelEvent)
-        writer.releaseLock()
-        aiResponse.body!.pipeTo(writable).catch(() => {})
-
-        return new Response(readable, {
+        return new Response(aiResponse.body, {
           headers: {
             ...corsHeaders,
             'Content-Type': 'text/event-stream',
