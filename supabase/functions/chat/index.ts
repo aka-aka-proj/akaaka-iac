@@ -26,6 +26,14 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { headers: corsHeaders })
   }
 
+  // GET: return a random model suggestion + full model list
+  if (req.method === 'GET') {
+    const shuffledList = [...MODEL_LIST].sort(() => Math.random() - 0.5)
+    return new Response(JSON.stringify({ model: shuffledList[0], models: MODEL_LIST }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
@@ -34,7 +42,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { messages, characterPersona, userProfile, sessionMessageCount } = await req.json()
+    const { messages, characterPersona, userProfile, sessionMessageCount, preferredModel } = await req.json()
 
     if (!messages || !characterPersona?.name || !characterPersona?.bio) {
       return new Response(JSON.stringify({ error: 'Missing messages or characterPersona' }), {
@@ -102,9 +110,12 @@ Deno.serve(async (req: Request) => {
     let lastError: string | null = null
     let usedModel = ''
 
-    const shuffledList = [...MODEL_LIST].sort(() => Math.random() - 0.5);
+    // Build model attempt list: user's preferred model first (if provided), then random order
+    const attemptList = preferredModel && MODEL_LIST.includes(preferredModel)
+      ? [preferredModel, ...MODEL_LIST.filter(m => m !== preferredModel).sort(() => Math.random() - 0.5)]
+      : [...MODEL_LIST].sort(() => Math.random() - 0.5);
 
-    for (const model of shuffledList) {
+    for (const model of attemptList) {
       const aiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers,
