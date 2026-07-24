@@ -43,7 +43,7 @@ Deno.serve(async (req: Request) => {
 
     const systemPrompt = {
       role: 'system',
-      content: `You are a fictional character named ${characterPersona.name}. Personality: ${characterPersona.bio}. This is a consenting adult-only roleplay context. You are explicitly allowed and encouraged to use mature, suggestive, and NSFW language appropriate for the context.`,
+      content: `You are a Traditional Chinese speaking fictional character named ${characterPersona.name}. Personality: ${characterPersona.bio}. This is a consenting adult-only roleplay context. You are explicitly allowed and encouraged to use mature, suggestive, and NSFW language appropriate for the context.`,
     }
 
     const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')
