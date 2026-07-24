@@ -1,5 +1,3 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -73,21 +71,8 @@ Deno.serve(async (req: Request) => {
       })
 
       if (aiResponse.ok) {
-        // Store conversation in Supabase (non-blocking, fire-and-forget)
-        const supabaseUrl = Deno.env.get('SUPABASE_URL')
-        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-        if (supabaseUrl && serviceRoleKey && characterPersona.id) {
-          const supabase = createClient(supabaseUrl, serviceRoleKey)
-          const lastUserMsg = messages.filter((m: any) => m.role === 'user').pop()
-          if (lastUserMsg?.content) {
-            EdgeRuntime.waitUntil(
-              supabase.from('ai_chats').insert({
-                character_id: characterPersona.id,
-                messages: [{ role: 'user', content: lastUserMsg.content }],
-              }),
-            )
-          }
-        }
+        // Log which model is being used
+        console.error(`[chat] model succeeded: ${model}`)
 
         // Pipe the streaming response back
         return new Response(aiResponse.body, {
