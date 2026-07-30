@@ -1,13 +1,18 @@
 -- Create taiwan_region enum type for event location filtering
 -- 大分區模式：北中南東離島 + 線上，避免單一縣市活動過少造成空搜尋
-create type public.taiwan_region as enum (
-  'North',
-  'Central',
-  'South',
-  'East',
-  'Islands',
-  'Online'
-);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'taiwan_region') THEN
+        CREATE TYPE public.taiwan_region AS ENUM (
+            'North',
+            'Central',
+            'South',
+            'East',
+            'Islands',
+            'Online'
+        );
+    END IF;
+END $$;
 
 -- Add location columns to events table
 alter table public.events
