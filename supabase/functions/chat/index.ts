@@ -6,16 +6,15 @@ const corsHeaders = {
 }
 
 const MODEL_LIST = [
-  'nvidia/nemotron-3-ultra-550b-a55b:free',
-  'nvidia/nemotron-3-super-120b-a12b:free',
-  'nvidia/nemotron-3-nano-30b-a3b:free',
-  'openai/gpt-oss-20b:free',
-  'deepseek/deepseek-v4-flash',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-  'cognitivecomputations/dolphin-mistral-24b-venice-edition',
+  'nvidia/nemotron-3-embed-1b:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free', // ok
+  'nvidia/nemotron-3-super-120b-a12b:free', // ok
+  'nvidia/nemotron-3-nano-30b-a3b:free', // ok
+  'openai/gpt-oss-20b:free', // ok
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', // talking too much
 ]
 
-const SUMMARY_MODEL = 'deepseek/deepseek-v4-flash'
+const SUMMARY_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
