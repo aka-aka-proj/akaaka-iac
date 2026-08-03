@@ -40,8 +40,9 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'unauthorized', message: 'Invalid or expired token' }, 401)
     }
 
-    const body = (await req.json()) as { event_id?: string }
+    const body = (await req.json()) as { event_id?: string; form_responses?: Record<string, unknown> }
     const eventId = body.event_id
+    const formResponses = body.form_responses
 
     if (!eventId) {
       return jsonResponse({ error: 'invalid', message: 'event_id is required' }, 400)
@@ -97,6 +98,32 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'already_registered', message: 'You already have an active registration for this event' }, 400)
     }
 
+    // 5b. Validate form responses if event has a form config
+    if (formResponses) {
+      const { data: eventFormConfig } = await serviceClient
+        .from('events')
+        .select('registration_form_config')
+        .eq('id', eventId)
+        .single()
+
+      if (eventFormConfig?.registration_form_config) {
+        const config = eventFormConfig.registration_form_config as Array<{ id: string; required?: boolean; type: string; options?: string[] }>
+        for (const field of config) {
+          if (field.required) {
+            const val = formResponses[field.id]
+            if (val === undefined || val === null || val === '' || val === false) {
+              return jsonResponse({ error: 'form_validation_error', message: `Required field '${field.id}' is missing` }, 400)
+            }
+          }
+          if (field.type === 'select' && field.options && formResponses[field.id]) {
+            if (!field.options.includes(formResponses[field.id] as string)) {
+              return jsonResponse({ error: 'form_validation_error', message: `Invalid value for field '${field.id}'` }, 400)
+            }
+          }
+        }
+      }
+    }
+
     // 6. Determine status: pending or waitlisted
     let status = 'pending'
     let waitlistPosition: number | null = null
@@ -140,7 +167,27 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'db_error', message: regError.message }, 500)
     }
 
-    return jsonResponse({ success: true, registration: reg }, 200)
+    // 8. Insert form responses if provided
+    let regResponses = null
+    if (formResponses && reg) {
+      const { data: respData, error: respError } = await serviceClient
+        .from('event_registration_responses')
+        .insert([{
+          registration_id: reg.id,
+          responses: formResponses,
+        }])
+        .select('id, responses')
+        .single()
+
+      if (respError) {
+        // Log but don't fail the registration - form responses are supplementary
+        console.error('Failed to insert form responses', respError)
+      } else {
+        regResponses = respData
+      }
+    }
+
+    return jsonResponse({ success: true, registration: reg, form_responses: regResponses }, 200)
   } catch (err) {
     console.error('create-registration unexpected error', err)
     return jsonResponse({ error: 'internal', message: 'Internal server error' }, 500)
