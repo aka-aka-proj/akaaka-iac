@@ -26,27 +26,6 @@ CREATE TABLE IF NOT EXISTS issue_comments (
 ALTER TABLE issues ENABLE ROW LEVEL SECURITY;
 ALTER TABLE issue_comments ENABLE ROW LEVEL SECURITY;
 
--- issues
-CREATE POLICY issues_insert_owner ON issues FOR INSERT TO authenticated
-WITH CHECK (reporter_id = auth.uid());
-CREATE POLICY issues_read_owner ON issues FOR SELECT TO authenticated
-USING (reporter_id = auth.uid() OR auth.jwt() ->> 'role' = 'admin');
-CREATE POLICY issues_update_admin ON issues FOR UPDATE TO authenticated
-USING (auth.jwt() ->> 'role' = 'admin')
-WITH CHECK (auth.jwt() ->> 'role' = 'admin');
-
--- issue_comments
-CREATE POLICY issue_comments_insert_auth ON issue_comments FOR INSERT TO authenticated
-WITH CHECK (profile_id = auth.uid());
-CREATE POLICY issue_comments_read_members ON issue_comments FOR SELECT TO authenticated
-USING (
-  EXISTS (
-    SELECT 1 FROM issues i
-    WHERE i.id = issue_id
-      AND (i.reporter_id = auth.uid() OR auth.jwt() ->> 'role' = 'admin')
-  )
-);
-
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_issues_status_created_at ON issues (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_issues_reporter_id ON issues (reporter_id);
