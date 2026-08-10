@@ -1,4 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { decryptProviderKey } from '../_shared/llm-key.ts'
+
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -37,6 +40,19 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    const authorization = req.headers.get('Authorization')
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')
+    const anonKey = Deno.env.get('SUPABASE_ANON_KEY')
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+    if (!authorization?.startsWith('Bearer ') || !supabaseUrl || !anonKey || !serviceRoleKey) {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    }
+    const userClient = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authorization } } })
+    const { data: { user }, error: userError } = await userClient.auth.getUser()
+    if (userError || !user) {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    }
+
     const { messages, characterPersona, userProfile, sessionMessageCount, preferredModel } = await req.json()
 
     if (!messages || !characterPersona?.name || !characterPersona?.bio) {
@@ -47,8 +63,6 @@ Deno.serve(async (req: Request) => {
     }
 
     // Read existing memory from DB
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
     let memory = ''
     if (supabaseUrl && serviceRoleKey && characterPersona.id) {
       const supabase = createClient(supabaseUrl, serviceRoleKey)
@@ -89,9 +103,32 @@ Deno.serve(async (req: Request) => {
       content: systemContent,
     }
 
-    const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')
-    if (!openRouterKey) {
-      return new Response(JSON.stringify({ error: 'OPENROUTER_API_KEY not configured' }), {
+    const encryptionSecret = Deno.env.get('OPENROUTER_KEY_ENCRYPTION_SECRET')
+    if (!encryptionSecret) {
+      return new Response(JSON.stringify({ error: 'llm_key_service_not_configured' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    const keyClient = createClient(supabaseUrl, serviceRoleKey)
+    const { data: keyRecord } = await keyClient
+      .from('user_llm_api_keys')
+      .select('encrypted_key, disabled')
+      .eq('user_id', user.id)
+      .maybeSingle()
+    if (!keyRecord?.encrypted_key || keyRecord.disabled) {
+      return new Response(JSON.stringify({ error: 'llm_key_not_provisioned' }), {
+        status: 409,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    let openRouterKey: string
+    try {
+      openRouterKey = await decryptProviderKey(keyRecord.encrypted_key, encryptionSecret)
+    } catch {
+      return new Response(JSON.stringify({ error: 'llm_key_unavailable' }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
