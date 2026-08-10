@@ -24,7 +24,7 @@ AS $$
     OR COALESCE(e.location_detail, '') ILIKE '%' || BTRIM(p_search) || '%'
   )
   AND (NULLIF(BTRIM(p_event_type), '') IS NULL OR e.event_type ILIKE '%' || BTRIM(p_event_type) || '%')
-  AND (NULLIF(BTRIM(p_location_region), '') IS NULL OR e.location_region = BTRIM(p_location_region))
+  AND (NULLIF(BTRIM(p_location_region), '') IS NULL OR e.location_region::text = BTRIM(p_location_region))
   AND (
     COALESCE(p_time_filter, 'upcoming') = 'all'
     OR (p_time_filter = 'upcoming' AND e.start_time >= timezone('utc', now()))
