@@ -3,7 +3,7 @@
 -- transitions create notifications.
 
 CREATE TABLE IF NOT EXISTS public.event_notification_subscriptions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   profile_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   event_type TEXT,
   creator_profile_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_event_notification_subscriptions_event_type
   WHERE event_type IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.notifications (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   recipient_profile_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   notification_type TEXT NOT NULL
     CHECK (notification_type IN ('new_event')),
@@ -127,11 +127,7 @@ BEGIN
   WHERE s.profile_id <> NEW.creator_id
     AND (
       s.creator_profile_id = NEW.creator_id
-      OR EXISTS (
-        SELECT 1
-        FROM unnest(COALESCE(NEW.event_type, '{}'::text[])) AS event_type(value)
-        WHERE s.event_type = event_type.value
-      )
+      OR s.event_type = NEW.event_type
     )
     AND NOT EXISTS (
       SELECT 1

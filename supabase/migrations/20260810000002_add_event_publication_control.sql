@@ -1,4 +1,25 @@
 -- Event publication control is separate from lifecycle_status.
+-- The initial events table predates lifecycle_status. Preserve existing events
+-- as published, then make newly created events drafts by default.
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'published';
+
+ALTER TABLE public.events
+  DROP CONSTRAINT IF EXISTS events_lifecycle_status_check,
+  ADD CONSTRAINT events_lifecycle_status_check
+    CHECK (lifecycle_status IN (
+      'draft',
+      'published',
+      'registration_open',
+      'registration_closed',
+      'completed',
+      'archived',
+      'cancelled'
+    ));
+
+ALTER TABLE public.events
+  ALTER COLUMN lifecycle_status SET DEFAULT 'draft';
+
 ALTER TABLE public.events
   ADD COLUMN IF NOT EXISTS publication_status TEXT NOT NULL DEFAULT 'closed',
   ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ,
