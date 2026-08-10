@@ -4,5 +4,9 @@
     "lib": ["deno.ns", "deno.window", "dom"],
     "strict": true
   },
-  "importMap": "./import_map.json"
+  "importMap": "./import_map.json",
+  "tasks": {
+    "test": "deno test --allow-env --allow-net _shared/*_test.ts get-user-analytics/*_test.ts",
+    "coverage": "deno test --allow-env --allow-net --coverage=coverage _shared/*_test.ts get-user-analytics/*_test.ts && deno coverage coverage --lcov --output=coverage.lcov"
+  }
 }

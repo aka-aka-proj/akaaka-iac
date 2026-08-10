@@ -25,7 +25,7 @@ function databaseErrorClientFactory() {
   let calls = 0;
   return () => {
     calls += 1;
-    if (calls === 1) return fakeClientFactory()("", "");
+    if (calls === 1) return fakeClientFactory()();
     return {
       from: () => ({
         select() {
