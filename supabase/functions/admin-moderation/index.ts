@@ -47,14 +47,8 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Unauthorized' }, 401)
     }
 
-    // Enforce admin role claim — check public.profiles.role_status
-    const { data: callerProfile, error: profileError } = await serviceClient
-      .from('profiles')
-      .select('role_status')
-      .eq('id', user.id)
-      .single()
-
-    if (profileError || callerProfile?.role_status !== 'admin') {
+    const callerRole = user.app_metadata?.role as string | undefined
+    if (callerRole !== 'admin') {
       return jsonResponse({ error: 'Forbidden: admin role required' }, 403)
     }
 
@@ -93,20 +87,6 @@ Deno.serve(async (req: Request) => {
 
     const serviceClient = createClient(supabaseUrl, serviceKey)
 
-    // Verify target profile exists
-    const { data: targetProfile, error: profileFetchError } = await serviceClient
-      .from('profiles')
-      .select('id, metadata')
-      .eq('id', target_profile_id)
-      .maybeSingle()
-
-    if (profileFetchError) {
-      return jsonResponse({ error: profileFetchError.message }, 500)
-    }
-    if (!targetProfile) {
-      return jsonResponse({ error: 'Target profile not found' }, 404)
-    }
-
     // 1. INSERT into moderation_actions
     const { data: moderationAction, error: insertError } = await serviceClient
       .from('moderation_actions')
@@ -138,17 +118,10 @@ Deno.serve(async (req: Request) => {
         .eq('id', target_profile_id)
       if (error) return jsonResponse({ error: error.message }, 500)
     } else if (typedAction === 'suspend' || typedAction === 'ban') {
-      const currentMetadata = (targetProfile.metadata as Record<string, unknown>) ?? {}
-      const { error } = await serviceClient
-        .from('profiles')
-        .update({
-          metadata: {
-            ...currentMetadata,
-            moderation_status: typedAction,
-            moderated_at: new Date().toISOString(),
-          },
-        })
-        .eq('id', target_profile_id)
+      const { error } = await serviceClient.rpc('set_profile_moderation_status', {
+        target_id: target_profile_id,
+        moderation_status: typedAction,
+      })
       if (error) return jsonResponse({ error: error.message }, 500)
     }
 

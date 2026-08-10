@@ -69,9 +69,8 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'not_found', message: 'Issue not found' }, 404)
     }
 
-    // Check permission: reporter or admin
-    const isAdmin = (user.app_metadata?.role as string | undefined) === 'admin'
-    if (issue.reporter_id !== user.id && !isAdmin) {
+    // Issue conversations are private to the reporter; admin is not an exception.
+    if (issue.reporter_id !== user.id) {
       return jsonResponse({ error: 'forbidden', message: 'You can only comment on your own issues' }, 403)
     }
 
