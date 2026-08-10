@@ -22,6 +22,11 @@ IaC (akaaka-iac, Supabase) -> Backend -> Frontend (Vercel)
 | PR CI | 檢查 `supabase/migrations` 與 `supabase/functions` |
 | Main CD | `supabase db push` -> deploy Supabase Edge Functions |
 
+Main CD 使用既有 hosted migration history 逐一比對；`supabase/migrations/`
+必須保留 production 已套用的每個 timestamp 檔案，新的 schema 變更才可在
+較新的 timestamp migration 中發布。不得在沒有 migration-history repair
+計畫時，將既有 migration 直接 squash 成單一 baseline。
+
 **產出物**：
 - Supabase schema 變更
 - Supabase Edge Functions 最新部署版本

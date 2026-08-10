@@ -35,7 +35,7 @@ IaC (本 repo, Supabase) -> Backend -> Frontend (Vercel)
 
 檢查內容：
 - `supabase/migrations` 路徑存在，且 migration 檔名符合 `YYYYMMDDHHMMSS_description.sql`
-- `supabase/functions` 路徑存在，且每個 function 目錄至少有 `index.ts` 或 `index.js`
+- `supabase/functions` 路徑存在，且每個可部署 function 目錄至少有 `index.ts` 或 `index.js`；`_shared` 為共用模組，不是可部署 function
 
 ### Main CD（`iac-cd.yml`）
 
