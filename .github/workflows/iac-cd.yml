@@ -51,7 +51,7 @@ jobs:
 
       - name: Deploy Supabase Edge Functions
         run: |
-          function_dirs="$(find supabase/functions -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)"
+          function_dirs="$(find supabase/functions -mindepth 2 -maxdepth 2 -type f -name index.ts -printf '%h\n' 2>/dev/null | sort -u || true)"
           if [ -z "$function_dirs" ]; then
             echo "No function directories under supabase/functions; skipping deploy."
             exit 0
