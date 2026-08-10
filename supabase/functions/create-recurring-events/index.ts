@@ -82,6 +82,8 @@ Deno.serve(async (req: Request) => {
         location_detail: parentEvent.location_detail,
         max_capacity: parentEvent.max_capacity,
         registration_deadline: parentEvent.registration_deadline,
+        external_registration_url: parentEvent.external_registration_url,
+        source_url: parentEvent.source_url,
       }]).select('id').single()
 
       if (insertError || !instance) {
