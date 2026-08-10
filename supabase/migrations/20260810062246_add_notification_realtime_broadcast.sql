@@ -28,7 +28,9 @@ AFTER INSERT ON public.notifications
 FOR EACH ROW
 EXECUTE FUNCTION private.broadcast_new_notification();
 
-ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
+-- Supabase enables RLS on the platform-managed realtime.messages table by
+-- default. The migration role is not the owner of that table, so do not run
+-- owner-only ALTER TABLE DDL here; only manage the authorization policy.
 
 DROP POLICY IF EXISTS notifications_realtime_receive_self ON realtime.messages;
 CREATE POLICY notifications_realtime_receive_self
