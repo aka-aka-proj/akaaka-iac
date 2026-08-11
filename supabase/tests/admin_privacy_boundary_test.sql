@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(21);
+SELECT plan(23);
 
 -- This suite deliberately checks the deployed migration contract only. It does
 -- not insert user content, use production identities, or claim to replace the
@@ -150,6 +150,27 @@ SELECT ok(
 SELECT ok(
   (SELECT prokind = 'f' FROM pg_proc WHERE oid = 'public.get_admin_report_queue()'::regprocedure),
   'moderation queue remains a function contract'
+);
+
+SELECT ok(
+  pg_get_functiondef('public.get_admin_report_queue()'::regprocedure) LIKE '%app_metadata%'
+    AND pg_get_functiondef('public.get_admin_report_queue()'::regprocedure) NOT LIKE '%auth.jwt() ->> ''role''%'
+    AND pg_get_functiondef('public.get_admin_report_queue()'::regprocedure) LIKE '%aal%aal2%',
+  'moderation queue checks app_metadata admin claim and aal2'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'moderation_actions'
+      AND policyname = 'moderation_actions_admin_rw'
+      AND qual LIKE '%app_metadata%'
+      AND qual LIKE '%aal%aal2%'
+      AND with_check LIKE '%app_metadata%'
+      AND with_check LIKE '%aal%aal2%'
+  ),
+  'moderation action policy checks app_metadata admin claim and aal2'
 );
 
 SELECT ok(
