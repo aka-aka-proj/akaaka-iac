@@ -8,6 +8,7 @@ on:
       - "supabase/migrations/**"
       - "supabase/functions/**"
       - ".github/workflows/iac-ci.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
