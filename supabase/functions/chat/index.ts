@@ -24,8 +24,7 @@ Deno.serve(async (req: Request) => {
 
   // GET: return a random model suggestion + full model list
   if (req.method === 'GET') {
-    const shuffledList = [...MODEL_LIST].sort(() => Math.random() - 0.5)
-    return new Response(JSON.stringify({ model: shuffledList[0], models: MODEL_LIST }), {
+    return new Response(JSON.stringify({ model: MODEL_LIST[0], models: MODEL_LIST }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }
@@ -150,7 +149,7 @@ You may use mature, suggestive, and sexually explicit language when the user has
     // Build model attempt list: user's preferred model first (if provided), then random order
     const attemptList = preferredModel && MODEL_LIST.includes(preferredModel)
       ? [preferredModel, ...MODEL_LIST.filter(m => m !== preferredModel).sort(() => Math.random() - 0.5)]
-      : [...MODEL_LIST].sort(() => Math.random() - 0.5);
+      : [MODEL_LIST[0], ...MODEL_LIST.slice(1).sort(() => Math.random() - 0.5)];
 
     for (const model of attemptList) {
       const aiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
