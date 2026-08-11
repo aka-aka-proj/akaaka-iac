@@ -8,7 +8,7 @@
 --   - Public read (SELECT) for authenticated users
 --   - Owner-only write (INSERT/UPDATE/DELETE) for file owners
 --
--- See: docs/spec/007-asset-storage-spec.md
+-- See: docs/spec/platform/001-asset-storage-spec.md
 
 -- ============================================================
 -- Helper: insert policy for a bucket (owner-only write)
