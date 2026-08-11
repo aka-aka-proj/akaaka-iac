@@ -53,12 +53,16 @@ Deno.serve(async (req: Request) => {
     // 1. Fetch event
     const { data: event, error: eventError } = await serviceClient
       .from('events')
-      .select('id, creator_id, max_capacity, registration_deadline')
+      .select('id, creator_id, max_capacity, registration_deadline, external_registration_url')
       .eq('id', eventId)
       .single()
 
     if (eventError || !event) {
       return jsonResponse({ error: 'not_found', message: 'Event not found' }, 404)
+    }
+
+    if (event.external_registration_url) {
+      return jsonResponse({ error: 'external_registration', message: 'This event uses an external registration form' }, 400)
     }
 
     // 2. Host cannot register for own event
