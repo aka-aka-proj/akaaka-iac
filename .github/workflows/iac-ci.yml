@@ -113,3 +113,16 @@ jobs:
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
+      - name: Check external registration boundary
+        if: matrix.target.name == 'functions'
+        run: |
+          registration="supabase/functions/create-registration/index.ts"
+          for required in \
+            "external_registration_url" \
+            "external_registration" \
+            "This event uses an external registration form"; do
+            if ! grep -Fq "$required" "$registration"; then
+              echo "Missing external registration contract: $required"
+              exit 1
+            fi
+          done
