@@ -16,6 +16,7 @@ jobs:
   supabase-checks:
     name: Verify ${{ matrix.target.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: true
       matrix:
@@ -48,6 +49,26 @@ jobs:
           if [ "$invalid" -ne 0 ]; then
             exit 1
           fi
+
+      - name: Set up Supabase CLI
+        if: matrix.target.name == 'migrations'
+        uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
+        with:
+          version: 2.111.0
+
+      - name: Run local privacy pgTAP contract
+        if: matrix.target.name == 'migrations'
+        env:
+          SUPABASE_TELEMETRY_DISABLED: "true"
+        run: |
+          supabase db start
+          supabase test db --local supabase/tests/admin_privacy_boundary_test.sql
+
+      - name: Stop local Supabase
+        if: always() && matrix.target.name == 'migrations'
+        env:
+          SUPABASE_TELEMETRY_DISABLED: "true"
+        run: supabase stop --no-backup
 
       - name: Check privacy and search security contracts
         if: matrix.target.name == 'migrations'
