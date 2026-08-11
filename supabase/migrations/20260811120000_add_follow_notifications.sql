@@ -42,7 +42,9 @@ BEGIN
     title
   )
   VALUES (NEW.followed_id, 'new_follow', NEW.follower_id, 'New follower')
-  ON CONFLICT (recipient_profile_id, notification_type, actor_profile_id) DO NOTHING;
+  ON CONFLICT (recipient_profile_id, notification_type, actor_profile_id)
+    WHERE actor_profile_id IS NOT NULL
+  DO NOTHING;
 
   RETURN NEW;
 END;
