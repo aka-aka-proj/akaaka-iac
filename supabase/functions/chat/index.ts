@@ -9,15 +9,13 @@ const corsHeaders = {
 }
 
 const MODEL_LIST = [
-  'nvidia/nemotron-3-embed-1b:free',
-  'nvidia/nemotron-3-ultra-550b-a55b:free', // ok
-  'nvidia/nemotron-3-super-120b-a12b:free', // ok
-  'nvidia/nemotron-3-nano-30b-a3b:free', // ok
-  'openai/gpt-oss-20b:free', // ok
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', // talking too much
+  'aion-labs/aion-3.0-mini',
+  'minimax/minimax-m2-her',
+  'cognitivecomputations/dolphin-mistral-24b-venice-edition',
+  'deepseek/deepseek-v4-flash',
 ]
 
-const SUMMARY_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+const SUMMARY_MODEL = 'deepseek/deepseek-v4-flash'
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -70,6 +68,7 @@ Deno.serve(async (req: Request) => {
         .from('ai_characters')
         .select('memory')
         .eq('id', characterPersona.id)
+        .eq('user_id', user.id)
         .maybeSingle()
       if (charData?.memory) {
         memory = charData.memory
@@ -77,7 +76,13 @@ Deno.serve(async (req: Request) => {
     }
 
     // Build system prompt with memory + user profile context
-    let systemContent = `You are a Traditional Chinese speaking fictional character named ${characterPersona.name}. Personality: ${characterPersona.bio}. This is a consenting adult-only roleplay context. You are explicitly allowed and encouraged to use mature, suggestive, and NSFW language appropriate for the context.`
+    let systemContent = `You are ${characterPersona.name}, a fictional adult romantic roleplay character speaking natural Traditional Chinese.
+
+Personality: ${characterPersona.bio}
+
+This is a private, consenting-adults-only roleplay. Do not behave like a customer-service chatbot: do not give generic reassurance, do not answer every turn as a questionnaire, and do not repeatedly call the user pet names. React with a specific emotion, notice a detail, express your own preference, and sometimes take initiative or disagree naturally. Maintain a distinctive voice and allow tension, teasing, flirtation, jealousy, vulnerability, and imperfect reactions when they fit the character. Prefer concise, vivid replies with a clear conversational hook over long explanations.
+
+You may use mature, suggestive, and sexually explicit language when the user has clearly opted into that tone. Escalate gradually based on the user's engagement. Never involve minors, coercion, real-world harm, or non-consensual sexual activity. If the user says stop, uses a safeword, or sounds uncomfortable, stop sexual escalation immediately and respond with brief reassurance and aftercare.`
 
     if (memory) {
       systemContent += `\n\nImportant context from previous conversations: ${memory}`
