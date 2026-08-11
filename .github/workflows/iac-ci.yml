@@ -49,6 +49,53 @@ jobs:
             exit 1
           fi
 
+      - name: Check privacy and search security contracts
+        if: matrix.target.name == 'migrations'
+        run: |
+          privacy="supabase/migrations/20260810061600_admin_privacy_boundary.sql"
+          search="supabase/migrations/20260811040000_server_side_event_search.sql"
+
+          for required in \
+            "CREATE POLICY profiles_read_self_admin" \
+            "CREATE POLICY reports_read_owner" \
+            "CREATE POLICY registrations_read_self_host" \
+            "CREATE POLICY reg_responses_read_self_host" \
+            "get_admin_report_queue" \
+            "SECURITY DEFINER" \
+            "REVOKE ALL ON FUNCTION public.get_admin_report_queue() FROM PUBLIC, anon, authenticated"; do
+            if ! grep -Fq "$required" "$privacy"; then
+              echo "Missing privacy migration contract: $required"
+              exit 1
+            fi
+          done
+
+          for forbidden in \
+            "DROP POLICY IF EXISTS profiles_read_all" \
+            "DROP POLICY IF EXISTS registrations_read_self_host_admin" \
+            "DROP POLICY IF EXISTS reg_responses_read_self_host_admin" \
+            "DROP POLICY IF EXISTS issues_update_admin" \
+            "DROP POLICY IF EXISTS audit_logs_admin_read"; do
+            if ! grep -Fq "$forbidden" "$privacy"; then
+              echo "Missing explicit admin privacy removal guard: $forbidden"
+              exit 1
+            fi
+          done
+
+          for required in \
+            "SECURITY INVOKER" \
+            "REVOKE ALL ON FUNCTION public.search_events" \
+            "GRANT EXECUTE ON FUNCTION public.search_events"; do
+            if ! grep -Fq "$required" "$search"; then
+              echo "Missing event search security contract: $required"
+              exit 1
+            fi
+          done
+
+          if grep -Fq "SECURITY DEFINER" "$search"; then
+            echo "search_events must remain SECURITY INVOKER"
+            exit 1
+          fi
+
       - name: Check functions entrypoints
         if: matrix.target.name == 'functions'
         run: |
