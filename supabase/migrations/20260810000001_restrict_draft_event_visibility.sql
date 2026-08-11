@@ -1,4 +1,9 @@
 -- Draft events are private to their creator regardless of visibility_settings.
+-- This migration predates the publication-control migration by timestamp. Keep
+-- fresh local resets safe when migrations are replayed strictly by version.
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'published';
+
 DROP POLICY IF EXISTS events_read_visibility ON events;
 
 CREATE POLICY events_read_visibility ON events FOR SELECT TO authenticated
