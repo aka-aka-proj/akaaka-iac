@@ -39,15 +39,10 @@ jobs:
           version: 1.200.0
 
       - name: Link Supabase project
-        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
 
       - name: Push database migrations
-        run: |
-          if [ -n "$SUPABASE_DB_PASSWORD" ]; then
-            supabase db push --password "$SUPABASE_DB_PASSWORD"
-          else
-            supabase db push
-          fi
+        run: supabase db push --password "$SUPABASE_DB_PASSWORD"
 
       - name: Deploy Supabase Edge Functions
         run: |
