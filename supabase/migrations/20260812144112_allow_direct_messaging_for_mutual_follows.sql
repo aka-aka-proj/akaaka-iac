@@ -1,0 +1,3 @@
+-- Compatibility marker for the Cloud migration applied through the Supabase
+-- migration channel. The executable SQL is kept in the repository migration
+-- 20260812000001_allow_direct_messaging_for_mutual_follows.sql.
