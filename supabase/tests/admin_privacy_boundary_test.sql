@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(23);
+SELECT plan(24);
 
 -- This suite deliberately checks the deployed migration contract only. It does
 -- not insert user content, use production identities, or claim to replace the
@@ -41,9 +41,25 @@ SELECT ok(
     WHERE schemaname = 'public'
       AND tablename = 'profiles'
       AND policyname = 'profiles_read_self_admin'
+      AND roles = '{authenticated}'
+      AND cmd = 'SELECT'
       AND qual LIKE '%auth.uid%'
   ),
-  'admin profile read policy is self-scoped'
+  'admin base profile read policy remains self-scoped'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM pg_views
+    WHERE schemaname = 'public' AND viewname = 'public_profiles'
+  ),
+  'public profile directory view exists'
+);
+
+SELECT ok(
+  has_table_privilege('authenticated', 'public.public_profiles', 'SELECT')
+    AND NOT has_table_privilege('anon', 'public.public_profiles', 'SELECT'),
+  'only authenticated users can read the public profile directory view'
 );
 
 SELECT is(
