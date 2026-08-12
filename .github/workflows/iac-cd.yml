@@ -34,18 +34,15 @@ jobs:
           [ -n "$SUPABASE_PROJECT_REF" ] || { echo "Missing SUPABASE_PROJECT_REF"; exit 1; }
 
       - name: Set up Supabase CLI
+        id: supabase-cli
         uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
         continue-on-error: true
         with:
           version: 1.200.0
 
       - name: Verify or install Supabase CLI fallback
+        if: steps.supabase-cli.outcome == 'failure'
         run: |
-          if command -v supabase >/dev/null 2>&1; then
-            supabase --version
-            exit 0
-          fi
-
           install_dir="$RUNNER_TEMP/supabase-bin"
           mkdir -p "$install_dir"
           curl --fail --silent --show-error --location \
