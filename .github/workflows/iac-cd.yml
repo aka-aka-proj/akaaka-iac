@@ -35,8 +35,25 @@ jobs:
 
       - name: Set up Supabase CLI
         uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
+        continue-on-error: true
         with:
           version: 1.200.0
+
+      - name: Verify or install Supabase CLI fallback
+        run: |
+          if command -v supabase >/dev/null 2>&1; then
+            supabase --version
+            exit 0
+          fi
+
+          install_dir="$RUNNER_TEMP/supabase-bin"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            https://raw.githubusercontent.com/supabase/cli/v1.200.0/install \
+            | bash -s -- --version 1.200.0 --install-dir "$install_dir" --no-modify-path
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/supabase" --version
 
       - name: Link Supabase project
         run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
