@@ -1,0 +1,2 @@
+-- Compatibility marker for the Cloud migration applied through Supabase MCP.
+-- Canonical migration source: 20260813000001_unify_social_relationships_on_mutual_follows.sql.
