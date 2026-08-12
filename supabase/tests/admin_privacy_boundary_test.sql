@@ -11,6 +11,31 @@ SELECT ok(
 );
 
 SELECT ok(
+  has_table_privilege('authenticated', 'public.profiles', 'INSERT'),
+  'authenticated can reach profiles INSERT through the Data API'
+);
+
+SELECT ok(
+  has_table_privilege('authenticated', 'public.profiles', 'UPDATE'),
+  'authenticated can reach profiles UPDATE through the Data API'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'public.profiles'::regclass
+      AND tgname = 'trg_protect_profile_system_fields'
+      AND NOT tgenabled = 'D'
+  ),
+  'profiles protects system-owned fields with an enabled trigger'
+);
+
+SELECT ok(
+  has_function_privilege('authenticated', 'public.protect_profile_system_fields()', 'EXECUTE'),
+  'profiles protection trigger function is executable by the table trigger'
+);
+
+SELECT ok(
   EXISTS (
     SELECT 1 FROM pg_policies
     WHERE schemaname = 'public'
