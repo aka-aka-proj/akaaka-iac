@@ -1,4 +1,31 @@
-import { deleteProviderKey } from './llm-key.ts'
+import { createProviderKey, deleteProviderKey } from './llm-key.ts'
+
+Deno.test('provider key creation targets the configured workspace', async () => {
+  const originalFetch = globalThis.fetch
+  let requestBody: Record<string, unknown> | undefined
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body))
+    return Response.json({
+      data: { hash: 'synthetic-hash' },
+      key: 'synthetic-key',
+    }, { status: 201 })
+  }
+
+  try {
+    await createProviderKey(
+      'synthetic-management-key',
+      'synthetic-name',
+      10,
+      'monthly',
+      '00000000-0000-0000-0000-000000000001',
+    )
+    if (requestBody?.workspace_id !== '00000000-0000-0000-0000-000000000001') {
+      throw new Error('expected configured workspace_id')
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
 
 Deno.test('provider delete treats an already missing key as idempotent', async () => {
   const originalFetch = globalThis.fetch

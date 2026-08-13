@@ -87,10 +87,12 @@ Deno.serve(async (req) => {
 
   const managementKey = Deno.env.get("OPENROUTER_MANAGEMENT_API_KEY");
   const encryptionSecret = Deno.env.get("OPENROUTER_KEY_ENCRYPTION_SECRET");
+  const workspaceId = Deno.env.get("OPENROUTER_WORKSPACE_ID");
   const limit = Number(Deno.env.get("OPENROUTER_USER_KEY_LIMIT_USD"));
   const limitReset = Deno.env.get("OPENROUTER_USER_KEY_LIMIT_RESET");
   if (
-    !managementKey || !encryptionSecret || !Number.isFinite(limit) ||
+    !managementKey || !encryptionSecret || !workspaceId ||
+    !Number.isFinite(limit) ||
     limit < 0 || !limitReset ||
     !["daily", "weekly", "monthly"].includes(limitReset)
   ) {
@@ -105,6 +107,7 @@ Deno.serve(async (req) => {
       keyName,
       limit,
       limitReset,
+      workspaceId,
     );
   } catch (error) {
     console.error(

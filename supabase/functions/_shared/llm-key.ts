@@ -87,6 +87,7 @@ export async function createProviderKey(
   name: string,
   limit: number,
   limitReset: string,
+  workspaceId: string,
 ) {
   const response = await fetch(OPENROUTER_KEYS_URL, {
     method: "POST",
@@ -94,7 +95,12 @@ export async function createProviderKey(
       Authorization: `Bearer ${managementKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ name, limit, limit_reset: limitReset }),
+    body: JSON.stringify({
+      name,
+      limit,
+      limit_reset: limitReset,
+      workspace_id: workspaceId,
+    }),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok || !body?.data?.hash || !body?.key) {
