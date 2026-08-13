@@ -1,4 +1,17 @@
-import { createProviderKey, deleteProviderKey, verifyProviderKey } from './llm-key.ts'
+import {
+  classifyProviderStatus,
+  createProviderKey,
+  deleteProviderKey,
+  verifyProviderKey,
+} from './llm-key.ts'
+
+Deno.test('provider status classification never exposes provider response bodies', () => {
+  if (classifyProviderStatus(401) !== 'provider_unauthorized') throw new Error('expected unauthorized')
+  if (classifyProviderStatus(403) !== 'provider_forbidden') throw new Error('expected forbidden')
+  if (classifyProviderStatus(429) !== 'provider_rate_limited') throw new Error('expected rate limited')
+  if (classifyProviderStatus(422) !== 'provider_request_rejected') throw new Error('expected rejected')
+  if (classifyProviderStatus(503) !== 'provider_unavailable') throw new Error('expected unavailable')
+})
 
 Deno.test('provider key creation targets the configured workspace', async () => {
   const originalFetch = globalThis.fetch

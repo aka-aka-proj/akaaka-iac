@@ -1,6 +1,21 @@
 const OPENROUTER_KEYS_URL = 'https://openrouter.ai/api/v1/keys'
 const OPENROUTER_CURRENT_KEY_URL = 'https://openrouter.ai/api/v1/key'
 
+export type ProviderFailureCode =
+  | 'provider_unauthorized'
+  | 'provider_forbidden'
+  | 'provider_rate_limited'
+  | 'provider_request_rejected'
+  | 'provider_unavailable'
+
+export function classifyProviderStatus(status: number): ProviderFailureCode {
+  if (status === 401) return 'provider_unauthorized'
+  if (status === 403) return 'provider_forbidden'
+  if (status === 429) return 'provider_rate_limited'
+  if (status >= 500) return 'provider_unavailable'
+  return 'provider_request_rejected'
+}
+
 type ProviderKey = {
   hash: string
   limit?: number | null
