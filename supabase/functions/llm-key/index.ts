@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
+  classifyProviderStatus,
   createProviderKey,
   deleteProviderKey,
   encryptProviderKey,
@@ -110,11 +111,17 @@ Deno.serve(async (req) => {
       workspaceId,
     );
   } catch (error) {
+    const providerStatus = error instanceof Error
+      ? Number(error.message.match(/^provider_create_failed:(\d+)$/)?.[1])
+      : NaN;
+    const providerError = Number.isInteger(providerStatus)
+      ? classifyProviderStatus(providerStatus)
+      : "provider_unavailable";
     console.error(
       "[llm-key] provider provisioning failed",
       error instanceof Error ? error.message : "unknown",
     );
-    return json({ error: "dependency_unavailable" }, 503);
+    return json({ error: "dependency_unavailable", provider_error: providerError }, 503);
   }
 
   try {

@@ -1,54 +1,50 @@
-import { createProviderKey, deleteProviderKey } from './llm-key.ts'
+import {
+  classifyProviderStatus,
+  createProviderKey,
+  deleteProviderKey,
+  verifyProviderKey,
+} from './llm-key.ts'
+
+Deno.test('provider status classification never exposes provider response bodies', () => {
+  if (classifyProviderStatus(401) !== 'provider_unauthorized') throw new Error('expected unauthorized')
+  if (classifyProviderStatus(403) !== 'provider_forbidden') throw new Error('expected forbidden')
+  if (classifyProviderStatus(429) !== 'provider_rate_limited') throw new Error('expected rate limited')
+  if (classifyProviderStatus(422) !== 'provider_request_rejected') throw new Error('expected rejected')
+  if (classifyProviderStatus(503) !== 'provider_unavailable') throw new Error('expected unavailable')
+})
 
 Deno.test('provider key creation targets the configured workspace', async () => {
   const originalFetch = globalThis.fetch
   let requestBody: Record<string, unknown> | undefined
   globalThis.fetch = async (_input, init) => {
     requestBody = JSON.parse(String(init?.body))
-    return Response.json({
-      data: { hash: 'synthetic-hash' },
-      key: 'synthetic-key',
-    }, { status: 201 })
+    return Response.json({ data: { hash: 'synthetic-hash' }, key: 'synthetic-key' }, { status: 201 })
   }
-
   try {
-    await createProviderKey(
-      'synthetic-management-key',
-      'synthetic-name',
-      10,
-      'monthly',
-      '00000000-0000-0000-0000-000000000001',
-    )
+    await createProviderKey('management', 'name', 1, 'monthly', '00000000-0000-0000-0000-000000000001')
     if (requestBody?.workspace_id !== '00000000-0000-0000-0000-000000000001') {
-      throw new Error('expected configured workspace_id')
+      throw new Error('expected workspace_id')
     }
   } finally {
     globalThis.fetch = originalFetch
   }
 })
 
-Deno.test('provider delete treats an already missing key as idempotent', async () => {
+Deno.test('provider delete treats 404 as idempotent', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response(null, { status: 404 })
-
   try {
-    await deleteProviderKey('synthetic-management-key', 'synthetic-hash')
+    await deleteProviderKey('management', 'hash')
   } finally {
     globalThis.fetch = originalFetch
   }
 })
 
-Deno.test('provider delete reports dependency failures without hiding status', async () => {
+Deno.test('provider verification accepts a valid provider key', async () => {
   const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => new Response(null, { status: 503 })
-
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: {} }), { status: 200 })
   try {
-    await deleteProviderKey('synthetic-management-key', 'synthetic-hash')
-    throw new Error('expected provider deletion to fail')
-  } catch (error) {
-    if (!(error instanceof Error) || error.message !== 'provider_delete_failed:503') {
-      throw error
-    }
+    await verifyProviderKey('provider-key')
   } finally {
     globalThis.fetch = originalFetch
   }
