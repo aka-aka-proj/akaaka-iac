@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(24);
+SELECT plan(29);
 
 -- This suite deliberately checks the deployed migration contract only. It does
 -- not insert user content, use production identities, or claim to replace the
