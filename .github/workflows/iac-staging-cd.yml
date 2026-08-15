@@ -25,16 +25,16 @@ jobs:
     environment:
       name: staging
     env:
-      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN_PREVIEW }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD_PREVIEW }}
       SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF_PREVIEW }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Validate staging secrets
         run: |
-          [ -n "$SUPABASE_ACCESS_TOKEN" ] || { echo "Missing staging SUPABASE_ACCESS_TOKEN"; exit 1; }
-          [ -n "$SUPABASE_DB_PASSWORD" ] || { echo "Missing staging SUPABASE_DB_PASSWORD"; exit 1; }
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || { echo "Missing staging SUPABASE_ACCESS_TOKEN_PREVIEW"; exit 1; }
+          [ -n "$SUPABASE_DB_PASSWORD" ] || { echo "Missing staging SUPABASE_DB_PASSWORD_PREVIEW"; exit 1; }
           [ "$SUPABASE_PROJECT_REF" = "xdknuxdhyvjgwlcliyqx" ] || { echo "Preview project ref is not the approved staging project"; exit 1; }
 
       - name: Set up Supabase CLI
