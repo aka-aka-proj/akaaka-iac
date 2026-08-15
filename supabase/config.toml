@@ -43,7 +43,7 @@ enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
 enable_signup = true
 enable_anonymous_sign_ins = false
-enable_manual_linking = false
+enable_manual_linking = true
 
 [auth.email]
 enable_signup = true
