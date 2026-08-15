@@ -3,6 +3,7 @@ import {
   classifyProviderStatus,
   createProviderKey,
   deleteProviderKey,
+  decryptProviderKey,
   encryptProviderKey,
   metadataFromProvider,
 } from "../_shared/llm-key.ts";
@@ -48,7 +49,7 @@ Deno.serve(async (req) => {
   const { data: existing } = await admin
     .from("user_llm_api_keys")
     .select(
-      "provider, provider_key_hash, limit_usd, limit_reset, disabled, usage_usd, limit_remaining_usd, provider_created_at, provider_updated_at",
+      "provider, provider_key_hash, encrypted_key, limit_usd, limit_reset, disabled, usage_usd, limit_remaining_usd, provider_created_at, provider_updated_at",
     )
     .eq("user_id", user.id)
     .maybeSingle();
@@ -81,7 +82,18 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (existing) return json(existing);
+  if (existing) {
+    const { encrypted_key: _encryptedKey, ...existingMetadata } = existing;
+    if (req.method === "GET") return json(existingMetadata);
+    const encryptionSecret = Deno.env.get("OPENROUTER_KEY_ENCRYPTION_SECRET");
+    if (!encryptionSecret) return json({ error: "llm_key_service_not_configured" }, 500);
+    try {
+      const providerKey = await decryptProviderKey(existing.encrypted_key, encryptionSecret);
+      return json({ ...existingMetadata, provider_key: providerKey });
+    } catch {
+      return json({ error: "llm_key_unavailable" }, 503);
+    }
+  }
   if (req.method === "GET") {
     return json({ error: "llm_key_not_provisioned" }, 409);
   }
@@ -138,7 +150,7 @@ Deno.serve(async (req) => {
     }).select(
       "provider, provider_key_hash, limit_usd, limit_reset, disabled, usage_usd, limit_remaining_usd, provider_created_at, provider_updated_at",
     ).single();
-    if (!error && data) return json(data, 201);
+    if (!error && data) return json({ ...data, provider_key: created.plaintext }, 201);
 
     const { data: raced } = await admin.from("user_llm_api_keys")
       .select(

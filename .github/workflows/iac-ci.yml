@@ -64,6 +64,7 @@ jobs:
         run: |
           supabase db start
           supabase test db --local supabase/tests/admin_privacy_boundary_test.sql
+          supabase test db --local supabase/tests/virtual_lover_encryption_contract_test.sql
 
       - name: Stop local Supabase
         if: always() && matrix.target.name == 'migrations'
