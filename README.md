@@ -15,7 +15,7 @@ IaC (本 repo, Supabase) -> Backend -> Frontend (Vercel)
 .
 |-- .github/workflows/
 |   |-- iac-ci.yml          # PR CI: 檢查 supabase/migrations 與 supabase/functions
-|   `-- iac-cd.yml          # main CD: supabase db push -> deploy functions
+|   `-- iac-cd.yml          # main CD: merge preview -> main 後 db push -> deploy functions
 |-- docs/
 |   `-- release-order.md    # 整體發版順序說明
 |-- supabase/
@@ -37,10 +37,16 @@ IaC (本 repo, Supabase) -> Backend -> Frontend (Vercel)
 - `supabase/migrations` 路徑存在，且 migration 檔名符合 `YYYYMMDDHHMMSS_description.sql`
 - `supabase/functions` 路徑存在，且每個可部署 function 目錄至少有 `index.ts` 或 `index.js`；`_shared` 為共用模組，不是可部署 function
 
+### Preview → Main 發版流程
+
+- 所有 IaC 變更先在 `preview` 分支提交與推送。
+- Preview 分支只使用 Supabase project `xdknuxdhyvjgwlcliyqx` 做驗證；project ref 不寫入 secret 以外的部署設定。
+- 驗證通過後建立 `preview` → `main` PR；禁止直接 push `main`。
+
 ### Main CD（`iac-cd.yml`）
 
 觸發條件：
-- push 到 `main` 且變更包含 `supabase/migrations/**` 或 `supabase/functions/**`
+- `preview` → `main` PR 合併後 push 到 `main`，且變更包含 `supabase/migrations/**` 或 `supabase/functions/**`
 - 或手動 `workflow_dispatch`
 
 部署順序：
