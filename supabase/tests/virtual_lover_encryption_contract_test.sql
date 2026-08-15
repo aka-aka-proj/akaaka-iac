@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(24);
+SELECT plan(26);
 
 SELECT ok(to_regclass('public.ai_encryption_devices') IS NOT NULL, 'device table exists');
 SELECT ok(to_regclass('public.ai_encryption_vault_keys') IS NOT NULL, 'wrapped vault key table exists');
