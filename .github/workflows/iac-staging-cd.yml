@@ -1,0 +1,87 @@
+name: Supabase IaC CD - preview staging deploy
+
+on:
+  push:
+    branches:
+      - preview
+    paths:
+      - "supabase/migrations/**"
+      - "supabase/functions/**"
+      - ".github/workflows/iac-staging-cd.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-staging-cd
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Push DB and deploy staging functions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: staging
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN_PREVIEW }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD_PREVIEW }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF_PREVIEW }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate staging secrets
+        run: |
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || { echo "Missing staging SUPABASE_ACCESS_TOKEN_PREVIEW"; exit 1; }
+          [ -n "$SUPABASE_DB_PASSWORD" ] || { echo "Missing staging SUPABASE_DB_PASSWORD_PREVIEW"; exit 1; }
+          [ "$SUPABASE_PROJECT_REF" = "xdknuxdhyvjgwlcliyqx" ] || { echo "Preview project ref is not the approved staging project"; exit 1; }
+
+      - name: Set up Supabase CLI
+        id: supabase-cli
+        uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
+        continue-on-error: true
+        with:
+          version: 1.200.0
+
+      - name: Verify or install Supabase CLI fallback
+        if: steps.supabase-cli.outcome == 'failure'
+        run: |
+          install_dir="$RUNNER_TEMP/supabase-bin"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            https://raw.githubusercontent.com/supabase/cli/v1.200.0/install \
+            | bash -s -- --version 1.200.0 --install-dir "$install_dir" --no-modify-path
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/supabase" --version
+
+      - name: Link staging Supabase project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+
+      - name: Push staging database migrations
+        run: supabase db push --password "$SUPABASE_DB_PASSWORD"
+
+      - name: Deploy staging Edge Functions
+        run: |
+          function_dirs="$(find supabase/functions -mindepth 2 -maxdepth 2 -type f -name index.ts -printf '%h\n' 2>/dev/null | sort -u || true)"
+          if [ -z "$function_dirs" ]; then
+            echo "No function directories under supabase/functions; skipping deploy."
+            exit 0
+          fi
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            fn="$(basename "$dir")"
+            echo "Deploying staging function: $fn"
+            supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF"
+          done <<< "$function_dirs"
+
+      - name: Write deployment summary
+        run: |
+          {
+            echo "## Supabase staging deployment"
+            echo "- Project ref: $SUPABASE_PROJECT_REF"
+            echo "- Branch: $GITHUB_REF_NAME"
+            echo "- Migrations: pushed"
+            echo "- Edge Functions: deployed"
+          } >> "$GITHUB_STEP_SUMMARY"
