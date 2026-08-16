@@ -25,7 +25,7 @@ Deno.test('provider-neutral ledger port appends idempotently and scopes restore 
   if (own.length !== 1 || other.length !== 0) throw new Error('restore read was not scoped')
 })
 
-Deno.test('ledger status transitions are monotonic and preserve failure state', async () => {
+Deno.test('ledger status transitions are monotonic and retry failed provider events', async () => {
   const ledger = createInMemoryDeletionLedger()
   await ledger.append(event)
   const applied = await ledger.transition({
@@ -60,9 +60,18 @@ Deno.test('ledger status transitions are monotonic and preserve failure state', 
       status: 'verified',
       at: '2026-08-16T00:03:00Z',
     })
-    throw new Error('failed event was revived')
+    throw new Error('failed event was directly verified')
   } catch (error) {
     if (!(error instanceof Error) || error.message !== 'ledger_event_failed') throw error
+  }
+  const retry = await ledger.transition({
+    subject: event.subject,
+    idempotencyKey: event.idempotencyKey,
+    status: 'applied',
+    at: '2026-08-16T00:04:00Z',
+  })
+  if (retry.status !== 'applied' || retry.failureCode !== undefined || retry.appliedAt !== '2026-08-16T00:04:00Z') {
+    throw new Error('failed event retry was not applied')
   }
 })
 
