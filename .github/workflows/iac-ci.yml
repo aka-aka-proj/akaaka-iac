@@ -236,4 +236,3 @@ jobs:
       - name: Validate Wrangler bundle without deployment
         run: npx --yes wrangler@4.123.0 deploy --dry-run
         working-directory: cloudflare/deletion-ledger-worker
-          done
