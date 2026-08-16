@@ -144,8 +144,9 @@ export function createSupabaseDeletionLedger(config: SupabaseDeletionLedgerConfi
     },
 
     async transition(input: LedgerStatusTransition) {
-      const current = (await list()).find((record) => record.idempotencyKey === input.idempotencyKey)
+      const current = (await list(input.subject)).find((record) => record.idempotencyKey === input.idempotencyKey)
       if (!current) throw new Error('ledger_event_not_found')
+      if (current.subject !== input.subject) throw new Error('ledger_subject_mismatch')
       assertLedgerTransition(current.status, input.status)
       if (input.status === 'failed' && !input.failureCode) throw new Error('failure_code_required')
       if (current.status === input.status) {
@@ -154,6 +155,7 @@ export function createSupabaseDeletionLedger(config: SupabaseDeletionLedgerConfi
       }
 
       const url = endpoint()
+      url.searchParams.set('subject', `eq.${input.subject}`)
       url.searchParams.set('idempotency_key', `eq.${input.idempotencyKey}`)
       url.searchParams.set('status', `eq.${current.status}`)
       const patch: Record<string, string> = { status: input.status }

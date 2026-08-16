@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { createSupabaseDeletionLedger } from '../_shared/supabase-deletion-ledger.ts'
+import { createCloudflareDeletionLedger } from '../_shared/cloudflare-deletion-ledger.ts'
 import { isAdminAal2, parseStageLedgerRequest, toSafeLedgerRecord } from '../_shared/deletion-ledger-control.ts'
 
 const corsHeaders = {
@@ -35,8 +35,8 @@ Deno.serve(async (req: Request) => {
   const mode = Deno.env.get('DELETION_LEDGER_CONTROL_MODE')
   const applicationUrl = Deno.env.get('SUPABASE_URL')
   const ledgerUrl = Deno.env.get('DELETION_LEDGER_URL')
-  const ledgerKey = Deno.env.get('DELETION_LEDGER_SERVICE_ROLE_KEY')
-  if (mode !== 'stage' || !applicationUrl || !ledgerUrl || !ledgerKey) return json({ error: 'ledger_service_not_configured' }, 500)
+  const ledgerToken = Deno.env.get('DELETION_LEDGER_AUTH_TOKEN')
+  if (mode !== 'stage' || !applicationUrl || !ledgerUrl || !ledgerToken) return json({ error: 'ledger_service_not_configured' }, 500)
 
   const authHeader = req.headers.get('Authorization')
   if (!authHeader) return json({ error: 'unauthorized' }, 401)
@@ -62,7 +62,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const ledger = createSupabaseDeletionLedger({ ledgerUrl, serviceRoleKey: ledgerKey, applicationUrl })
+    const ledger = createCloudflareDeletionLedger({ workerUrl: ledgerUrl, authToken: ledgerToken, applicationUrl })
     if (request.operation === 'append') {
       const record = await ledger.append({ ...request.event, auditActor: 'controlled_fixture' })
       return json({ record: toSafeLedgerRecord(record) })

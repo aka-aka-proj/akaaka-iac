@@ -8,6 +8,7 @@ on:
       - "supabase/migrations/**"
       - "supabase/ledger/**"
       - "supabase/functions/**"
+      - "cloudflare/**"
       - ".github/workflows/iac-ci.yml"
   workflow_dispatch:
 
@@ -180,10 +181,10 @@ jobs:
           control="supabase/functions/deletion-ledger-control/index.ts"
           for required in \
             "DELETION_LEDGER_CONTROL_MODE" \
-            "DELETION_LEDGER_SERVICE_ROLE_KEY" \
+            "DELETION_LEDGER_AUTH_TOKEN" \
             "ledger_service_not_configured" \
             "forbidden_admin_aal2_required" \
-            "createSupabaseDeletionLedger" \
+            "createCloudflareDeletionLedger" \
             "controlled_fixture"; do
             if ! grep -Fq "$required" "$control"; then
               echo "Missing stage deletion ledger control contract: $required"
@@ -192,6 +193,7 @@ jobs:
           done
           for forbidden in \
             "SUPABASE_SERVICE_ROLE_KEY.*DELETION_LEDGER" \
+            "DELETION_LEDGER_SERVICE_ROLE_KEY" \
             "console.log" \
             "response.text()" \
             "response.body"; do
@@ -199,4 +201,39 @@ jobs:
               echo "Forbidden deletion ledger control pattern: $forbidden"
               exit 1
             fi
+          done
+
+  cloudflare-ledger-checks:
+    name: Verify Cloudflare deletion ledger provider
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check provider boundary
+        run: |
+          worker="cloudflare/deletion-ledger-worker/src/index.ts"
+          core="cloudflare/deletion-ledger-worker/src/ledger.ts"
+          config="cloudflare/deletion-ledger-worker/wrangler.jsonc"
+          for required in \
+            "DurableObject" \
+            "LEDGER_AUTH_TOKEN" \
+            "LEDGER_MODE" \
+            "idempotency_key" \
+            "ledger_transition_conflict"; do
+            if ! grep -Fq "$required" "$worker" "$core" "$config"; then
+              echo "Missing Cloudflare ledger contract: $required"
+              exit 1
+            fi
+          done
+          for forbidden in console.log SUPABASE_SERVICE_ROLE_KEY DELETION_LEDGER_SERVICE_ROLE_KEY; do
+            if grep -Fq "$forbidden" "$worker" "$core"; then
+              echo "Forbidden Cloudflare ledger pattern: $forbidden"
+              exit 1
+            fi
+          done
+
+      - name: Validate Wrangler bundle without deployment
+        run: npx --yes wrangler@4.123.0 deploy --dry-run
+        working-directory: cloudflare/deletion-ledger-worker
           done

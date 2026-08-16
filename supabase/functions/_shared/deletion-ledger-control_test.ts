@@ -25,6 +25,7 @@ Deno.test('stage ledger request accepts only metadata append fields', () => {
 Deno.test('stage ledger request rejects non-fixture and content-shaped fields', () => {
   for (const value of [
     { operation: 'list', subject: 'real-user' },
+    { operation: 'transition', subject: 'real-user', idempotencyKey: 'x', status: 'applied', at: 'now' },
     { operation: 'append', event: { subject: 'stage-fixture-user-1', deletionEpoch: 1, kind: 'account', idempotencyKey: 'x', createdAt: 'now', prompt: 'secret' } },
   ]) {
     let rejected = false

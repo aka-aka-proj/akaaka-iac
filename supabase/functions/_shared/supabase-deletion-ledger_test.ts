@@ -96,12 +96,14 @@ Deno.test('Supabase adapter uses optimistic status transitions and safe retries'
   })
 
   const applied = await ledger.transition({
+    subject: event.subject,
     idempotencyKey: event.idempotencyKey,
     status: 'applied',
     at: '2026-08-16T00:01:00Z',
   })
   if (applied.status !== 'applied' || applied.appliedAt !== '2026-08-16T00:01:00Z') throw new Error('transition failed')
   const retried = await ledger.transition({
+    subject: event.subject,
     idempotencyKey: event.idempotencyKey,
     status: 'applied',
     at: '2026-08-16T00:01:00Z',
