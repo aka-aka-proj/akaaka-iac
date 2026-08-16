@@ -34,6 +34,12 @@ Deno.test('ledger status transitions are monotonic and preserve failure state', 
     at: '2026-08-16T00:01:00Z',
   })
   if (applied.status !== 'applied' || !applied.appliedAt) throw new Error('apply transition missing evidence')
+  const replayedApply = await ledger.transition({
+    idempotencyKey: event.idempotencyKey,
+    status: 'applied',
+    at: '2026-08-16T00:01:00Z',
+  })
+  if (replayedApply.appliedAt !== applied.appliedAt) throw new Error('apply retry changed evidence')
 
   const failed = await ledger.transition({
     idempotencyKey: event.idempotencyKey,
