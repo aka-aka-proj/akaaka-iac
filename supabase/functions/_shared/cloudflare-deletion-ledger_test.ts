@@ -35,4 +35,8 @@ Deno.test('Cloudflare adapter uses server token and metadata-only routes', async
   if (applied.status !== 'applied') throw new Error('cloudflare_transition_failed')
   const request = requests.find((candidate) => candidate.method === 'PATCH')
   if (!request || request.headers.get('Authorization') !== 'Bearer server-only-token' || request.url.includes('prompt')) throw new Error('unsafe_cloudflare_request')
+  const body = await request!.json() as Record<string, unknown>
+  if (body.subject !== event.subject || body.idempotencyKey !== event.idempotencyKey || body.status !== 'applied' || body.at !== '2026-08-16T00:01:00Z' || 'operation' in body) {
+    throw new Error('unsafe_cloudflare_transition_body')
+  }
 })
