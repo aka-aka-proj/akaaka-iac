@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(30);
+SELECT plan(32);
 
 SELECT ok(to_regclass('public.ai_encryption_devices') IS NOT NULL, 'device table exists');
 SELECT ok(to_regclass('public.ai_encryption_vault_keys') IS NOT NULL, 'wrapped vault key table exists');
@@ -30,6 +30,8 @@ SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryp
 SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryption_migrations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%pending%in_progress%complete%'), 'migration status is constrained');
 SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryption_migrations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%failure_code%'), 'migration failure code is constrained');
 SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryption_devices'::regclass AND conname = 'ai_encryption_devices_public_key_is_public'), 'device table rejects private JWK members');
+SELECT ok(EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.ai_messages'::regclass AND tgname = 'ai_messages_prevent_plaintext_writes'), 'message plaintext trigger exists');
+SELECT ok(EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.ai_characters'::regclass AND tgname = 'ai_characters_prevent_plaintext_writes'), 'character memory plaintext trigger exists');
 SELECT ok((SELECT obj_description('public.ai_encryption_devices'::regclass, 'pg_class') LIKE '%never private keys%'), 'device table documents private-key exclusion');
 SELECT ok((SELECT obj_description('public.ai_encryption_vault_keys'::regclass, 'pg_class') LIKE '%never raw data keys%'), 'vault table documents raw-key exclusion');
 
