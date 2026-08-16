@@ -92,17 +92,20 @@ const order: Record<DeletionStatus, number> = { recorded: 0, applied: 1, verifie
 
 export function transitionRecord(current: DeletionRecord, input: TransitionInput): DeletionRecord {
   if (current.subject !== input.subject) throw new Error('ledger_subject_mismatch')
-  if (current.status === 'failed') throw new Error('ledger_event_failed')
-  if (order[input.status] < order[current.status]) throw new Error('invalid_ledger_transition')
   if (input.status === 'failed' && !input.failureCode) throw new Error('failure_code_required')
   if (current.status === input.status) {
+    if (input.status === 'failed' && current.failureCode !== input.failureCode) throw new Error('invalid_ledger_transition')
     return current
+  }
+  if (current.status === 'failed' && input.status !== 'applied') throw new Error('ledger_event_failed')
+  if (order[input.status] < order[current.status] && !(current.status === 'failed' && input.status === 'applied')) {
+    throw new Error('invalid_ledger_transition')
   }
   return {
     ...current,
     status: input.status,
     appliedAt: input.status === 'applied' ? input.at : current.appliedAt,
     verifiedAt: input.status === 'verified' ? input.at : current.verifiedAt,
-    failureCode: input.status === 'failed' ? input.failureCode : current.failureCode,
+    failureCode: input.status === 'failed' ? input.failureCode : input.status === 'applied' ? undefined : current.failureCode,
   }
 }
