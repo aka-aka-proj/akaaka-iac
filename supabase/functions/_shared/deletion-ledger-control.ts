@@ -13,7 +13,7 @@ const operations = new Set(['append', 'list', 'transition'])
 export type LedgerControlRequest =
   | { operation: 'append'; event: Omit<DeletionEvent, 'auditActor'> }
   | { operation: 'list'; subject: string }
-  | { operation: 'transition'; idempotencyKey: string; status: Exclude<DeletionStatus, 'recorded'>; at: string; failureCode?: string }
+  | { operation: 'transition'; subject: string; idempotencyKey: string; status: Exclude<DeletionStatus, 'recorded'>; at: string; failureCode?: string }
 
 export type SafeLedgerRecord = Pick<
   DeletionRecord,
@@ -86,13 +86,15 @@ export function parseStageLedgerRequest(value: unknown): LedgerControlRequest {
     return { operation, subject }
   }
 
-  assertKeys(value, ['operation', 'idempotencyKey', 'status', 'at', 'failureCode'])
+  assertKeys(value, ['operation', 'subject', 'idempotencyKey', 'status', 'at', 'failureCode'])
+  const subject = requiredString(value.subject, 'subject')
+  if (!subject.startsWith('stage-fixture-')) throw new Error('stage_fixture_subject_required')
   const idempotencyKey = requiredString(value.idempotencyKey, 'idempotency_key')
   if (typeof value.status !== 'string' || !statuses.has(value.status as DeletionStatus) || !transitionStatuses.has(value.status as Exclude<DeletionStatus, 'recorded'>)) throw new Error('status_invalid')
   const at = requiredString(value.at, 'transition_at')
   if (value.status === 'failed' && typeof value.failureCode !== 'string') throw new Error('failure_code_required')
   if (value.status !== 'failed' && value.failureCode !== undefined) throw new Error('failure_code_not_allowed')
-  return { operation: 'transition', idempotencyKey, status: value.status as Exclude<DeletionStatus, 'recorded'>, at, failureCode: value.failureCode as string | undefined }
+  return { operation: 'transition', subject, idempotencyKey, status: value.status as Exclude<DeletionStatus, 'recorded'>, at, failureCode: value.failureCode as string | undefined }
 }
 
 export function toSafeLedgerRecord(record: DeletionRecord): SafeLedgerRecord {

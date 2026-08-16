@@ -6,6 +6,7 @@ import {
 } from './deletion-ledger.ts'
 
 export interface LedgerStatusTransition {
+  subject: string
   idempotencyKey: string
   status: Exclude<DeletionStatus, 'recorded'>
   at: string
@@ -73,6 +74,7 @@ export function createInMemoryDeletionLedger(
       const index = records.findIndex((record) => record.idempotencyKey === input.idempotencyKey)
       if (index < 0) throw new Error('ledger_event_not_found')
       const current = records[index]
+      if (current.subject !== input.subject) throw new Error('ledger_subject_mismatch')
       assertLedgerTransition(current.status, input.status)
       if (input.status === 'failed' && !input.failureCode) throw new Error('failure_code_required')
       if (current.status === input.status) {

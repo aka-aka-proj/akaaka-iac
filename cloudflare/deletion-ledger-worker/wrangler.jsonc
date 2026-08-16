@@ -1,0 +1,19 @@
+{
+  "name": "akaaka-deletion-ledger-stage",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-16",
+  "vars": {
+    "LEDGER_MODE": "stage"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "LEDGER", "class_name": "DeletionLedger" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["DeletionLedger"] }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}

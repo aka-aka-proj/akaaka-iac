@@ -29,12 +29,14 @@ Deno.test('ledger status transitions are monotonic and preserve failure state', 
   const ledger = createInMemoryDeletionLedger()
   await ledger.append(event)
   const applied = await ledger.transition({
+    subject: event.subject,
     idempotencyKey: event.idempotencyKey,
     status: 'applied',
     at: '2026-08-16T00:01:00Z',
   })
   if (applied.status !== 'applied' || !applied.appliedAt) throw new Error('apply transition missing evidence')
   const replayedApply = await ledger.transition({
+    subject: event.subject,
     idempotencyKey: event.idempotencyKey,
     status: 'applied',
     at: '2026-08-16T00:01:00Z',
@@ -42,6 +44,7 @@ Deno.test('ledger status transitions are monotonic and preserve failure state', 
   if (replayedApply.appliedAt !== applied.appliedAt) throw new Error('apply retry changed evidence')
 
   const failed = await ledger.transition({
+    subject: event.subject,
     idempotencyKey: event.idempotencyKey,
     status: 'failed',
     at: '2026-08-16T00:02:00Z',
@@ -52,6 +55,7 @@ Deno.test('ledger status transitions are monotonic and preserve failure state', 
   }
   try {
     await ledger.transition({
+      subject: event.subject,
       idempotencyKey: event.idempotencyKey,
       status: 'verified',
       at: '2026-08-16T00:03:00Z',
@@ -67,6 +71,7 @@ Deno.test('ledger port rejects incomplete failure evidence and content-shaped fi
   await ledger.append(event)
   try {
     await ledger.transition({
+      subject: event.subject,
       idempotencyKey: event.idempotencyKey,
       status: 'failed',
       at: '2026-08-16T00:04:00Z',
