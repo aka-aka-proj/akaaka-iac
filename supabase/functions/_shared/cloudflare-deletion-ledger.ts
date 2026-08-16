@@ -82,9 +82,16 @@ export function createCloudflareDeletionLedger(config: CloudflareDeletionLedgerC
         if (input.status === 'failed' && current.failureCode !== input.failureCode) throw new Error('invalid_ledger_transition')
         return current
       }
+      const transitionBody = {
+        subject: input.subject,
+        idempotencyKey: input.idempotencyKey,
+        status: input.status,
+        at: input.at,
+        ...(input.failureCode === undefined ? {} : { failureCode: input.failureCode }),
+      }
       const body = await request<{ record: unknown }>('/v1/ledger/events/transition', {
         method: 'PATCH',
-        body: JSON.stringify(input),
+        body: JSON.stringify(transitionBody),
       }, 'transition')
       return safeRecord(body.record)
     },
