@@ -1,6 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { createCloudflareDeletionLedger } from '../_shared/cloudflare-deletion-ledger.ts'
-import { isAdminAal2, parseStageLedgerRequest, toSafeLedgerRecord } from '../_shared/deletion-ledger-control.ts'
+import { isAdminAal2, parseStageLedgerRequest, readJwtPayload, toSafeLedgerRecord } from '../_shared/deletion-ledger-control.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -10,17 +10,6 @@ const corsHeaders = {
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
-}
-
-function readJwtPayload(authHeader: string): Record<string, unknown> | null {
-  try {
-    const encoded = authHeader.replace(/^Bearer\s+/i, '').split('.')[1]
-    if (!encoded) return null
-    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
-    return JSON.parse(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='))
-  } catch {
-    return null
-  }
 }
 
 function stableError(error: unknown): string {
