@@ -20,7 +20,7 @@ SELECT ok(EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'ai_encryption_mig
 SELECT ok(has_column_privilege('authenticated', 'public.ai_messages', 'content_ciphertext', 'INSERT'), 'messages allow encrypted content insert');
 SELECT ok(NOT has_column_privilege('authenticated', 'public.ai_messages', 'content', 'INSERT'), 'messages deny legacy plaintext insert');
 SELECT ok(has_column_privilege('authenticated', 'public.ai_messages', 'content_ciphertext', 'UPDATE'), 'messages allow encrypted content update');
-SELECT ok(NOT has_column_privilege('authenticated', 'public.ai_messages', 'content', 'UPDATE'), 'messages deny legacy plaintext update');
+SELECT ok(has_column_privilege('authenticated', 'public.ai_messages', 'content', 'UPDATE'), 'messages allow controlled legacy NULL cleanup');
 SELECT ok(has_column_privilege('authenticated', 'public.ai_characters', 'memory_ciphertext', 'UPDATE'), 'characters allow encrypted memory update');
 SELECT ok(NOT has_column_privilege('authenticated', 'public.ai_characters', 'memory', 'UPDATE'), 'characters deny legacy plaintext memory update');
 SELECT ok((SELECT is_nullable = 'YES' FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ai_messages' AND column_name = 'content'), 'legacy message content is nullable for encrypted inserts');
