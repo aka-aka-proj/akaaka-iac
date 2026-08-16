@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "supabase/migrations/**"
+      - "supabase/ledger/**"
       - "supabase/functions/**"
       - ".github/workflows/iac-ci.yml"
   workflow_dispatch:
@@ -118,6 +119,29 @@ jobs:
             echo "search_events must remain SECURITY INVOKER"
             exit 1
           fi
+
+      - name: Check independent deletion ledger bootstrap boundary
+        if: matrix.target.name == 'functions'
+        run: |
+          ledger="supabase/ledger/001_deletion_ledger_bootstrap.sql"
+          for required in \
+            "CREATE TABLE IF NOT EXISTS public.deletion_ledger_events" \
+            "ENABLE ROW LEVEL SECURITY" \
+            "REVOKE ALL ON TABLE public.deletion_ledger_events FROM PUBLIC, anon, authenticated" \
+            "GRANT SELECT, INSERT, UPDATE ON TABLE public.deletion_ledger_events TO service_role" \
+            "deletion_ledger_failed_requires_code" \
+            "deletion_ledger_verified_requires_timestamp"; do
+            if ! grep -Fq "$required" "$ledger"; then
+              echo "Missing independent ledger contract: $required"
+              exit 1
+            fi
+          done
+          for forbidden in prompt completion plaintext ciphertext wrapped_key private_key provider_secret; do
+            if grep -Eiq "^[[:space:]]+${forbidden}[[:space:]]" "$ledger"; then
+              echo "Forbidden content-shaped ledger field: $forbidden"
+              exit 1
+            fi
+          done
 
       - name: Check functions entrypoints
         if: matrix.target.name == 'functions'

@@ -40,10 +40,10 @@ function cloneRecord(record: DeletionRecord): DeletionRecord {
   }
 }
 
-function assertTransition(current: DeletionStatus, next: DeletionStatus): void {
+export function assertLedgerTransition(current: DeletionStatus, next: DeletionStatus): void {
   if (current === 'failed') throw new Error('ledger_event_failed')
   if (next === 'failed') return
-  if (STATUS_ORDER[next] <= STATUS_ORDER[current]) throw new Error('invalid_ledger_transition')
+  if (STATUS_ORDER[next] < STATUS_ORDER[current]) throw new Error('invalid_ledger_transition')
 }
 
 /** Synthetic-only adapter used by unit tests and controlled fixtures. */
@@ -73,8 +73,14 @@ export function createInMemoryDeletionLedger(
       const index = records.findIndex((record) => record.idempotencyKey === input.idempotencyKey)
       if (index < 0) throw new Error('ledger_event_not_found')
       const current = records[index]
-      assertTransition(current.status, input.status)
+      assertLedgerTransition(current.status, input.status)
       if (input.status === 'failed' && !input.failureCode) throw new Error('failure_code_required')
+      if (current.status === input.status) {
+        if (input.status === 'failed' && current.failureCode !== input.failureCode) {
+          throw new Error('invalid_ledger_transition')
+        }
+        return cloneRecord(current)
+      }
 
       const next: DeletionRecord = {
         ...current,
