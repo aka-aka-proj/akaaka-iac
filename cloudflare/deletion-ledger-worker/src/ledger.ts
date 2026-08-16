@@ -1,5 +1,6 @@
 export type DeletionKind = 'account' | 'lost_key' | 'device_revoke' | 'provider_key_revoke'
 export type DeletionStatus = 'recorded' | 'applied' | 'verified' | 'failed'
+export const RETENTION_CLEANUP_BATCH_SIZE = 100
 
 export interface DeletionEvent {
   subject: string
@@ -25,6 +26,14 @@ export interface TransitionInput {
   status: Exclude<DeletionStatus, 'recorded'>
   at: string
   failureCode?: string
+}
+
+export function isRetentionEligible(record: Pick<DeletionRecord, 'status' | 'createdAt'>, now: string, retentionDays: number): boolean {
+  if (record.status !== 'verified' || !Number.isSafeInteger(retentionDays) || retentionDays < 1) return false
+  const createdAt = Date.parse(record.createdAt)
+  const nowAt = Date.parse(now)
+  if (!Number.isFinite(createdAt) || !Number.isFinite(nowAt)) return false
+  return createdAt < nowAt - retentionDays * 24 * 60 * 60 * 1000
 }
 
 const eventKeys = new Set(['subject', 'deletionEpoch', 'kind', 'deviceIds', 'providerKeyIds', 'idempotencyKey', 'createdAt', 'auditActor'])
