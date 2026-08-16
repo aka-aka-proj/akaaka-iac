@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(26);
+SELECT plan(32);
 
 SELECT ok(to_regclass('public.ai_encryption_devices') IS NOT NULL, 'device table exists');
 SELECT ok(to_regclass('public.ai_encryption_vault_keys') IS NOT NULL, 'wrapped vault key table exists');
@@ -20,12 +20,18 @@ SELECT ok(EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'ai_encryption_mig
 SELECT ok(has_column_privilege('authenticated', 'public.ai_messages', 'content_ciphertext', 'INSERT'), 'messages allow encrypted content insert');
 SELECT ok(NOT has_column_privilege('authenticated', 'public.ai_messages', 'content', 'INSERT'), 'messages deny legacy plaintext insert');
 SELECT ok(has_column_privilege('authenticated', 'public.ai_messages', 'content_ciphertext', 'UPDATE'), 'messages allow encrypted content update');
-SELECT ok(NOT has_column_privilege('authenticated', 'public.ai_messages', 'content', 'UPDATE'), 'messages deny legacy plaintext update');
+SELECT ok(has_column_privilege('authenticated', 'public.ai_messages', 'content', 'UPDATE'), 'messages allow controlled legacy NULL cleanup');
 SELECT ok(has_column_privilege('authenticated', 'public.ai_characters', 'memory_ciphertext', 'UPDATE'), 'characters allow encrypted memory update');
 SELECT ok(NOT has_column_privilege('authenticated', 'public.ai_characters', 'memory', 'UPDATE'), 'characters deny legacy plaintext memory update');
+SELECT ok((SELECT is_nullable = 'YES' FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ai_messages' AND column_name = 'content'), 'legacy message content is nullable for encrypted inserts');
+SELECT ok((SELECT is_nullable = 'YES' FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ai_characters' AND column_name = 'memory'), 'legacy character memory is nullable for encrypted writes');
+SELECT ok(EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'ai_messages' AND policyname = 'ai_messages_update_owner' AND qual LIKE '%auth.uid%' AND with_check LIKE '%auth.uid%'), 'messages encrypted update is owner scoped');
 SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryption_devices'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%status%active%revoked%'), 'device status is constrained');
 SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryption_migrations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%pending%in_progress%complete%'), 'migration status is constrained');
 SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryption_migrations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%failure_code%'), 'migration failure code is constrained');
+SELECT ok(EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.ai_encryption_devices'::regclass AND conname = 'ai_encryption_devices_public_key_is_public'), 'device table rejects private JWK members');
+SELECT ok(EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.ai_messages'::regclass AND tgname = 'ai_messages_prevent_plaintext_writes'), 'message plaintext trigger exists');
+SELECT ok(EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.ai_characters'::regclass AND tgname = 'ai_characters_prevent_plaintext_writes'), 'character memory plaintext trigger exists');
 SELECT ok((SELECT obj_description('public.ai_encryption_devices'::regclass, 'pg_class') LIKE '%never private keys%'), 'device table documents private-key exclusion');
 SELECT ok((SELECT obj_description('public.ai_encryption_vault_keys'::regclass, 'pg_class') LIKE '%never raw data keys%'), 'vault table documents raw-key exclusion');
 
