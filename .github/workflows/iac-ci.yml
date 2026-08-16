@@ -173,3 +173,30 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Check stage deletion ledger control boundary
+        if: matrix.target.name == 'functions'
+        run: |
+          control="supabase/functions/deletion-ledger-control/index.ts"
+          for required in \
+            "DELETION_LEDGER_CONTROL_MODE" \
+            "DELETION_LEDGER_SERVICE_ROLE_KEY" \
+            "ledger_service_not_configured" \
+            "forbidden_admin_aal2_required" \
+            "createSupabaseDeletionLedger" \
+            "controlled_fixture"; do
+            if ! grep -Fq "$required" "$control"; then
+              echo "Missing stage deletion ledger control contract: $required"
+              exit 1
+            fi
+          done
+          for forbidden in \
+            "SUPABASE_SERVICE_ROLE_KEY.*DELETION_LEDGER" \
+            "console.log" \
+            "response.text()" \
+            "response.body"; do
+            if grep -Eiq "$forbidden" "$control"; then
+              echo "Forbidden deletion ledger control pattern: $forbidden"
+              exit 1
+            fi
+          done
