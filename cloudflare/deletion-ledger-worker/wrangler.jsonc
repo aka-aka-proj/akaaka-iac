@@ -3,7 +3,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-16",
   "vars": {
-    "LEDGER_MODE": "stage"
+    "LEDGER_MODE": "stage",
+    "LEDGER_RETENTION_DAYS": "90"
   },
   "durable_objects": {
     "bindings": [

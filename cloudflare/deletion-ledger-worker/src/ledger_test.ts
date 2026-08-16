@@ -1,4 +1,4 @@
-import { parseEvent, parseTransition, transitionRecord, type DeletionRecord } from './ledger.ts'
+import { isRetentionEligible, parseEvent, parseTransition, transitionRecord, type DeletionRecord } from './ledger.ts'
 
 Deno.test('Cloudflare ledger parser enforces stage metadata boundary', () => {
   const event = parseEvent({
@@ -54,5 +54,23 @@ Deno.test('Cloudflare failed provider event can retry with the same idempotency 
   }))
   if (retry.status !== 'applied' || retry.failureCode !== undefined || retry.appliedAt !== '2026-08-16T00:03:00Z') {
     throw new Error('failed_event_retry_not_applied')
+  }
+})
+
+Deno.test('Cloudflare retention cleanup eligibility is verified-only and 90-day bounded', () => {
+  const now = '2026-08-16T00:00:00Z'
+  if (!isRetentionEligible({ status: 'verified', createdAt: '2026-05-17T23:59:59Z' }, now, 90)) {
+    throw new Error('old_verified_record_not_eligible')
+  }
+  for (const status of ['recorded', 'applied', 'failed'] as const) {
+    if (isRetentionEligible({ status, createdAt: '2026-01-01T00:00:00Z' }, now, 90)) {
+      throw new Error(`${status}_record_was_eligible`)
+    }
+  }
+  if (isRetentionEligible({ status: 'verified', createdAt: '2026-05-18T00:00:00Z' }, now, 90)) {
+    throw new Error('boundary_record_was_eligible')
+  }
+  if (isRetentionEligible({ status: 'verified', createdAt: 'not-a-date' }, now, 90)) {
+    throw new Error('invalid_timestamp_was_eligible')
   }
 })
