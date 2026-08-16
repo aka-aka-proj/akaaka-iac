@@ -1,9 +1,17 @@
-import { isAdminAal2, parseStageLedgerRequest, toSafeLedgerRecord } from './deletion-ledger-control.ts'
+import { isAdminAal2, parseStageLedgerRequest, readJwtPayload, toSafeLedgerRecord } from './deletion-ledger-control.ts'
 
 Deno.test('stage ledger authorization requires admin role and AAL2', () => {
   if (!isAdminAal2({ app_metadata: { role: 'admin' } }, { aal: 'aal2' })) throw new Error('valid_admin_rejected')
   if (isAdminAal2({ app_metadata: { role: 'admin' } }, { aal: 'aal1' })) throw new Error('aal1_accepted')
   if (isAdminAal2({ app_metadata: { role: 'user' } }, { aal: 'aal2' })) throw new Error('non_admin_accepted')
+})
+
+Deno.test('JWT payload decoder reads base64url claims', () => {
+  const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+  const payload = readJwtPayload(`Bearer ${encode({ alg: 'none' })}.${encode({ sub: 'fixture', aal: 'aal2', app_metadata: { role: 'admin' } })}.signature`)
+  if (payload?.sub !== 'fixture' || payload.aal !== 'aal2' || (payload.app_metadata as Record<string, unknown>)?.role !== 'admin') {
+    throw new Error('jwt_payload_not_decoded')
+  }
 })
 
 Deno.test('stage ledger request accepts only metadata append fields', () => {

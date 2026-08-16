@@ -28,6 +28,19 @@ export function isAdminAal2(
   return user.app_metadata?.role === 'admin' && jwtPayload?.aal === 'aal2'
 }
 
+export function readJwtPayload(authHeader: string): Record<string, unknown> | null {
+  try {
+    const encoded = authHeader.replace(/^Bearer\s+/i, '').split('.')[1]
+    if (!encoded) return null
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='))
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
