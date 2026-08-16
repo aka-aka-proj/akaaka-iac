@@ -42,8 +42,9 @@ function cloneRecord(record: DeletionRecord): DeletionRecord {
 }
 
 export function assertLedgerTransition(current: DeletionStatus, next: DeletionStatus): void {
-  if (current === 'failed') throw new Error('ledger_event_failed')
+  if (current === 'failed' && next !== 'failed' && next !== 'applied') throw new Error('ledger_event_failed')
   if (next === 'failed') return
+  if (current === 'failed' && next === 'applied') return
   if (STATUS_ORDER[next] < STATUS_ORDER[current]) throw new Error('invalid_ledger_transition')
 }
 
@@ -89,7 +90,7 @@ export function createInMemoryDeletionLedger(
         status: input.status,
         appliedAt: input.status === 'applied' ? input.at : current.appliedAt,
         verifiedAt: input.status === 'verified' ? input.at : current.verifiedAt,
-        failureCode: input.status === 'failed' ? input.failureCode : current.failureCode,
+        failureCode: input.status === 'failed' ? input.failureCode : input.status === 'applied' ? undefined : current.failureCode,
       }
       records = [...records.slice(0, index), next, ...records.slice(index + 1)]
       return cloneRecord(next)
