@@ -1,2 +1,5 @@
 .env.local
 .wrangler/
+
+# Next.js (build artifacts from frontend)
+.next/
