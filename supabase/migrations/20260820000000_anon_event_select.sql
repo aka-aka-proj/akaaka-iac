@@ -29,3 +29,7 @@ CREATE POLICY events_anon_select_public ON public.events
 
 COMMENT ON POLICY events_anon_select_public ON public.events IS
   'Allow anonymous users to view public event details by direct URL';
+
+-- Step 4: Grant table-level SELECT privilege to anon role
+-- The Data API requires table privilege before RLS can filter rows.
+GRANT SELECT ON public.events TO anon;
