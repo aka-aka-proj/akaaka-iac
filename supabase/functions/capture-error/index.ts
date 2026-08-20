@@ -1,13 +1,21 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 /**
+<<<<<<< HEAD
  * Sentiniel profile ID for anonymous (unauthenticated) client error captures.
+=======
+ * Sentinel profile ID for anonymous (unauthenticated) client error captures.
+>>>>>>> origin/main
  *
  * The following one row must exist in `profiles` on each Supabase project
  * (staging & production) for the FK constraint to accept anonymous inserts:
  *
  *   INSERT INTO profiles (id, role_status, display_name)
+<<<<<<< HEAD
  *   VALUES ('00000000-0000-0000-0000-000000000001', 'system', 'System Error Reporter')
+=======
+ *   VALUES ('00000000-0000-0000-0000-000000000001', 'general', 'System Error Reporter')
+>>>>>>> origin/main
  *   ON CONFLICT (id) DO NOTHING;
  */
 const ANONYMOUS_REPORTER_ID = '00000000-0000-0000-0000-000000000001'
