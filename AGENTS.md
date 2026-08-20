@@ -13,6 +13,21 @@
 | **Production** | `https://fkqvjchizknuifjxiawe.supabase.co` | `/home/zacko/Projects/AkaAka/supabase.prod.anon` |
 | **Staging** | `https://xdknuxdhyvjgwlcliyqx.supabase.co` | `/home/zacko/Projects/AkaAka/supabase.stage.anon` |
 
+## Supabase DB Password
+
+執行 `supabase db push` 部署 migration 到遠端資料庫時需要 DB password（不同於 anon key）：
+
+| 環境 | DB Password 檔案 |
+|---|---|
+| **Production** | `/home/zacko/Projects/AkaAka/supabase.db.pwd.prod` |
+| **Staging** | `/home/zacko/Projects/AkaAka/supabase.db.pwd.stage` |
+
+進入 `akaaka-iac/` 目錄時 `direnv` 會自動載入 `SUPABASE_DB_PASSWORD`（staging），直接執行 `supabase db push` 即可。若需部署 production，手動切換：
+```bash
+export SUPABASE_DB_PASSWORD="$(cat /home/zacko/Projects/AkaAka/supabase.db.pwd.prod)"
+supabase db push
+```
+
 - 操作 Supabase REST API 或驗證 migration 時，從對應的 anon key 檔案讀取 key。
 - 變更 Supabase schema、migration、Edge Function 或部署流程後，依 skill 的文件檢查清單確認需更新的文件。
 - 不得儲存原始照片；多媒體僅能使用 FB、IG、X.com 的外部社群連結。
