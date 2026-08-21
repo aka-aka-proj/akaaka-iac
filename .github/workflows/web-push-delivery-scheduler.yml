@@ -1,0 +1,78 @@
+name: Web Push delivery scheduler
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-push-delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    name: Claim and deliver Web Push jobs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DELIVERY_PROJECT_REF: ${{ github.ref == 'refs/heads/main' && secrets.SUPABASE_PROJECT_REF || secrets.SUPABASE_PROJECT_REF_PREVIEW }}
+      DELIVERY_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PUSH_DELIVERY_TOKEN || secrets.PUSH_DELIVERY_TOKEN_PREVIEW }}
+    steps:
+      - name: Validate scheduler target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "schedule" ] && [ "$REF_NAME" != "refs/heads/main" ]; then
+            echo "Scheduled delivery is only allowed on main."
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$REF_NAME" != "refs/heads/preview" ] && [ "$REF_NAME" != "refs/heads/main" ]; then
+            echo "Manual delivery is only allowed on preview or main."
+            exit 1
+          fi
+          [ -n "$DELIVERY_PROJECT_REF" ] || { echo "Missing delivery project ref"; exit 1; }
+          [ -n "$DELIVERY_TOKEN" ] || { echo "Missing delivery token secret"; exit 1; }
+
+      - name: Invoke delivery worker
+        id: delivery
+        env:
+          DELIVERY_URL: https://${{ env.DELIVERY_PROJECT_REF }}.supabase.co/functions/v1/deliver-web-push
+        run: |
+          set -euo pipefail
+          response_file="$RUNNER_TEMP/web-push-delivery-response.json"
+          http_code="$(curl --fail-with-body --silent --show-error --location \
+            --retry 2 --retry-all-errors --retry-delay 2 \
+            --output "$response_file" --write-out '%{http_code}' \
+            --request POST "$DELIVERY_URL" \
+            --header "Authorization: Bearer $DELIVERY_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{"limit":100}')"
+          if [ "$http_code" != "200" ]; then
+            echo "Delivery worker returned HTTP $http_code"
+            exit 1
+          fi
+          jq -e '
+            (.claimed | type == "number") and
+            (.sent | type == "number") and
+            (.retryable | type == "number") and
+            (.endpoint_invalid | type == "number") and
+            (.dead_letter | type == "number") and
+            (.skipped | type == "number")
+          ' "$response_file" >/dev/null
+          summary="$(jq -c '{claimed, sent, retryable, endpoint_invalid, dead_letter, skipped}' "$response_file")"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Web Push delivery"
+            echo "- Environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}"
+            echo "- HTTP status: $http_code"
+            echo "- Summary: \`$summary\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if jq -e '.dead_letter > 0' "$response_file" >/dev/null; then
+            echo "Delivery worker reported dead-letter jobs."
+            exit 1
+          fi

@@ -27,6 +27,9 @@ enabled = true
 policy = "per_worker"
 inspector_port = 8083
 
+[functions.deliver-web-push]
+verify_jwt = false
+
 [analytics]
 enabled = false
 
