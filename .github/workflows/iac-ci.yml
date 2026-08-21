@@ -10,6 +10,7 @@ on:
       - "supabase/functions/**"
       - "cloudflare/**"
       - ".github/workflows/iac-ci.yml"
+      - ".github/workflows/web-push-delivery-scheduler.yml"
   workflow_dispatch:
 
 permissions:
