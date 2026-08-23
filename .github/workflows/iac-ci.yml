@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "supabase/migrations/**"
+      - "supabase/tests/**"
       - "supabase/ledger/**"
       - "supabase/functions/**"
       - "cloudflare/**"
@@ -60,14 +61,16 @@ jobs:
         with:
           version: 2.111.0
 
-      - name: Run local privacy pgTAP contract
+      - name: Run local pgTAP contracts
         if: matrix.target.name == 'migrations'
         env:
           SUPABASE_TELEMETRY_DISABLED: "true"
         run: |
           supabase db start
-          supabase test db --local supabase/tests/admin_privacy_boundary_test.sql
-          supabase test db --local supabase/tests/virtual_lover_encryption_contract_test.sql
+          for test_file in supabase/tests/*.sql; do
+            echo "Running $test_file"
+            supabase test db --local "$test_file"
+          done
 
       - name: Stop local Supabase
         if: always() && matrix.target.name == 'migrations'
