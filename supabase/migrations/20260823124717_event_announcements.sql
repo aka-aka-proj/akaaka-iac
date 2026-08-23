@@ -40,6 +40,25 @@ CREATE INDEX IF NOT EXISTS idx_event_announcements_scheduled
   ON public.event_announcements (publish_at)
   WHERE status = 'scheduled';
 
+CREATE OR REPLACE FUNCTION public.is_event_announcement_registrant(p_event_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.event_registrations er
+    WHERE er.event_id = p_event_id
+      AND er.profile_id = auth.uid()
+      AND er.status IN ('approved', 'pending', 'waitlisted', 'cancelled')
+  );
+$$;
+
+REVOKE ALL ON FUNCTION public.is_event_announcement_registrant(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_event_announcement_registrant(UUID) TO authenticated;
+
 -- Registered members retain the same event access for native events even when
 -- the event is not public. Blocking or an unpublished/closed event removes it.
 DROP POLICY IF EXISTS events_read_visibility ON public.events;
@@ -56,13 +75,7 @@ USING (
          OR (b.blocker_id = events.creator_id AND b.blocked_id = auth.uid())
     )
     AND (
-      EXISTS (
-        SELECT 1
-        FROM public.event_registrations er
-        WHERE er.event_id = events.id
-          AND er.profile_id = auth.uid()
-          AND er.status IN ('approved', 'pending', 'waitlisted', 'cancelled')
-      )
+      public.is_event_announcement_registrant(events.id)
       OR (visibility_settings ->> 'type') IS NULL
       OR (visibility_settings ->> 'type') = 'public'
       OR (
@@ -104,13 +117,7 @@ CREATE POLICY event_announcements_select_access
                  OR (b.blocker_id = e.creator_id AND b.blocked_id = auth.uid())
             )
             AND (
-              EXISTS (
-                SELECT 1
-                FROM public.event_registrations er
-                WHERE er.event_id = e.id
-                  AND er.profile_id = auth.uid()
-                  AND er.status IN ('approved', 'pending', 'waitlisted', 'cancelled')
-              )
+              public.is_event_announcement_registrant(e.id)
               OR
               COALESCE(e.visibility_settings ->> 'type', 'public') = 'public'
               OR (
@@ -281,7 +288,7 @@ ALTER TABLE public.notifications
 
 CREATE UNIQUE INDEX IF NOT EXISTS notifications_event_announcement_target_unique
   ON public.notifications (recipient_profile_id, event_announcement_id)
-  WHERE event_announcement_id IS NOT NULL;
+;
 
 CREATE OR REPLACE FUNCTION public.validate_event_announcement_input(
   p_event_id UUID,
