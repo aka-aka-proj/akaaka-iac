@@ -15,7 +15,7 @@ type DeliveryRow = {
   notification_id: string;
   push_subscription_id: string;
   attempts: number;
-  notification_type: "new_event" | "new_issue" | "new_follow" | "venue_application" | "event_invitation";
+  notification_type: "new_event" | "new_issue" | "new_follow" | "venue_application" | "event_invitation" | "event_announcement";
   event_id: string | null;
   actor_profile_id: string | null;
   venue_application_profile_id: string | null;

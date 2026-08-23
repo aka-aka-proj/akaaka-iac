@@ -4,6 +4,7 @@ export type NotificationType =
   | 'new_follow'
   | 'venue_application'
   | 'event_invitation'
+  | 'event_announcement'
 
 export interface NotificationDeliveryInput {
   notificationId: string
@@ -45,6 +46,7 @@ export function buildMinimalPushPayload(input: NotificationDeliveryInput): Minim
   switch (input.notificationType) {
     case 'new_event':
     case 'event_invitation':
+    case 'event_announcement':
       return {
         notification_id: notificationId,
         notification_type: input.notificationType,
