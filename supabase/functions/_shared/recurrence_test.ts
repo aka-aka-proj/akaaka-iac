@@ -316,6 +316,21 @@ Deno.test('V21 monthly by-date steps by interval months from the base event', ()
   ])
 })
 
+Deno.test('V22 DST spring-forward gap resolves to the instant after the transition', () => {
+  const base = new Date('2026-03-22T01:30:00.000Z') // Berlin 02:30, one week before the gap
+  const dates = generateRecurringDates(base, {
+    frequency: 'weekly',
+    interval: 1,
+    days: ['Sun'],
+    count: 3,
+    timezone: 'Europe/Berlin',
+  })
+  assertEquals(dates.map((date) => date.toISOString()), [
+    '2026-03-29T01:30:00.000Z', // requested 02:30 does not exist → lands on 03:30 local
+    '2026-04-05T00:30:00.000Z',
+  ])
+})
+
 Deno.test('V20 legacy count and until coexist: filter by until first, then truncate by count', () => {
   const base = new Date('2026-08-10T12:00:00.000Z')
   const boundedByUntil = generateRecurringDates(base, {

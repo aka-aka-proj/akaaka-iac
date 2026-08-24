@@ -109,18 +109,24 @@ function timeZoneOffsetMs(instantMs: number, timeZone: string): number {
   return Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute, time.second, time.millisecond) - instantMs
 }
 
-// Local wall-clock components in `timeZone` → UTC instant. Re-reading the offset
-// at successive guesses makes DST transitions converge deterministically:
-// ambiguous times resolve to the earlier instant, gap times shift forward.
+// Local wall-clock components in `timeZone` → UTC instant. Re-reading the
+// offset at successive guesses converges deterministically for normal and
+// ambiguous (fall-back) times. A spring-forward GAP never converges — the
+// iteration oscillates between two instants — so detect the cycle and pick
+// the later one, placing the schedule after the transition (e.g. Berlin
+// 02:30 → 03:30 local).
 function zonedWallTimeToUtcMs(date: CalendarDate, time: WallTime, timeZone: string): number {
   const naive = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute, time.second, time.millisecond)
+  let previous = Number.NaN
   let utc = naive
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < 8; i += 1) {
     const next = naive - timeZoneOffsetMs(utc, timeZone)
-    if (next === utc) break
+    if (next === utc) return utc
+    if (i > 0 && next === previous) return Math.max(utc, next)
+    previous = utc
     utc = next
   }
-  return utc
+  return Math.max(previous, utc)
 }
 
 function addCalendarDays(date: CalendarDate, days: number): CalendarDate {
