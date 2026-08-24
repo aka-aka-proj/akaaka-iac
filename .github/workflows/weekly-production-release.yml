@@ -195,8 +195,9 @@ jobs:
           fi
 
           if [ "$resume_watch" -eq 1 ]; then
-            # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過
-            if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --jq '.files[].filename')"; then
+            # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過；
+            # commit 可能超過單頁 30 檔，必須分頁取得完整檔案清單再判斷觸發路徑
+            if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --paginate --jq '.files[].filename')"; then
               deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 0
             fi
             will_deploy=0
@@ -220,7 +221,7 @@ jobs:
                   detail="Supabase production deploy succeeded (run https://github.com/$REPO/actions/runs/$run)"
                 else
                   deploy="failed"
-                  detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run)"
+                  detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run); awaiting manual remediation: rerun that run or revert/hotfix — orchestrator never auto-retries (spec 001)"
                 fi
                 exit 0
               fi
@@ -431,9 +432,17 @@ jobs:
           for row in "${rows[@]}"; do
             n="${row%%$'\t'*}"; expect="${row##*$'\t'}"
 
-            # 僅計具寫入權限帳號的核准（author association OWNER/MEMBER/COLLABORATOR）：排除 bot，
-            # 也排除公開 repo 外部帳號的自核准，落實「具寫入權限者 APPROVED 才可合併」契約
-            approvals="$(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not)) | select((.authorAssociation // "NONE") as $a | $a == "OWNER" or $a == "MEMBER" or $a == "COLLABORATOR")] | length')"
+            # 僅計「目前實際具寫入權限」帳號的 APPROVED：association（MEMBER/COLLABORATOR）不保證現行權限，
+            # 須以 collaborators/{login}/permission 查得 write/admin 才算數；查詢失敗時 fail-closed 不計，
+            # 落實「具寫入權限者 APPROVED 才可合併」契約
+            approvals=0
+            while IFS= read -r reviewer; do
+              [ -z "$reviewer" ] && continue
+              perm="$(gh api "repos/$REPO/collaborators/$reviewer/permission" --jq '.permission_name // .permission' 2>/dev/null || true)"
+              case "$perm" in
+                admin|write) approvals=$((approvals+1)) ;;
+              esac
+            done < <(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not)) | .author.login] | unique | .[]')
             if [ "${approvals:-0}" -eq 0 ]; then
               detail+="PR #$n skipped (awaiting human approval); "
               continue
@@ -512,7 +521,8 @@ jobs:
           done
           if [ "$overall" = "success" ] && \
              [ "${{ needs.release-iac.outputs.result }}" != "released" ] && \
-             [ "${{ needs.release-frontend.outputs.result }}" != "released" ]; then
+             [ "${{ needs.release-frontend.outputs.result }}" != "released" ] && \
+             [ "${{ needs.release-docs.outputs.result }}" != "released" ]; then
             overall="nothing-to-ship"
           fi
 
