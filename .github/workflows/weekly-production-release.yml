@@ -149,11 +149,14 @@ jobs:
           while IFS=$'\t' read -r n expect_head snap_base; do
             [ -n "$n" ] || continue
 
-            # Approval binding：取最新一筆非 pending 的人類 review；排除 Bot/App 與 [bot] 後綴。
+            # Approval binding：取最新一筆非 pending 的人類 review；排除 Bot/App、
+            # [bot] 後綴，並要求 reviewer 具寫入權限（OWNER/MEMBER/COLLABORATOR）
+            # ——公開 repo 外部帳號不得以自核准觸發高權限合併。
             # reviewed commit 必須等於快照 head——核准後偷推 commit 不具合併資格。
             latest="$(gh api "repos/$REPO/pulls/$n/reviews" --paginate 2>/dev/null | jq -s -c '
               flatten
               | map(select(.state != "PENDING"))
+              | map(select(.author_association as $a | $a == "OWNER" or $a == "MEMBER" or $a == "COLLABORATOR"))
               | map(select((.user.type // "") != "Bot"))
               | map(select(((.user.login // "") | ascii_downcase | endswith("[bot]")) | not))
               | sort_by(.submitted_at // "")
@@ -996,7 +999,19 @@ jobs:
           set -uo pipefail
           REPO="${GITHUB_REPOSITORY}"
           BRANCH="$RELEASE_STATE_BRANCH"
-          prev_json="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
+          # 讀取既有 checkpoint：必須區分「檔案尚不存在（HTTP 404，可正常 bootstrap）」與
+          # 「API 錯誤／內容無法取得（狀態不可靠）」。後者直接跳過寫入——若以本次資料覆寫，
+          # 可能清掉待 resume 的失敗部署紀錄或 expands/consumptions ledger，讓未套用的
+          # production migration 永久漏部署、contract-step evidence 被意外洗掉
+          prev_err="$(mktemp)"
+          prev_b64="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>"$prev_err")" || true
+          if [ -s "$prev_err" ] && ! grep -q 'HTTP 404' "$prev_err"; then
+            echo "::warning::cannot reliably read previous checkpoint ($(tr '\n' ' ' <"$prev_err")); skipping checkpoint write to preserve pending release state"
+            rm -f "$prev_err"
+            exit 0
+          fi
+          rm -f "$prev_err"
+          prev_json="$(printf '%s' "$prev_b64" | base64 -d 2>/dev/null || true)"
 
           # 舊 schema（v1）正規化到 v2：補預設欄位、ledger 自零開始累積
           prev_norm="$(printf '%s' "$prev_json" | jq -c '
