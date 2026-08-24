@@ -69,13 +69,13 @@ SELECT ok(
     SELECT pg_get_functiondef(p.oid)
     FROM pg_proc p
     WHERE p.oid = 'public.publish_due_event_announcements()'::regprocedure
-  ) LIKE '%SQLSTATE <> ''P1500''%'
+  ) LIKE '%SQLSTATE = ''P1500''%'
   AND (
     SELECT pg_get_functiondef(p.oid)
     FROM pg_proc p
     WHERE p.oid = 'public.publish_due_event_announcements()'::regprocedure
-  ) LIKE '%%RAISE;%',
-  'cron wrapper re-raises every failure except the retryable conflict'
+  ) LIKE '%RAISE WARNING%publish_due_event_announcements skipped announcement%',
+  'cron wrapper retries only the frequency conflict and isolates other failures as warnings'
 );
 
 SELECT * FROM finish();

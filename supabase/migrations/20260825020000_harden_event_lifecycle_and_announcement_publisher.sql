@@ -153,13 +153,14 @@ BEGIN
       published_count := published_count + 1;
     EXCEPTION
       WHEN OTHERS THEN
-        -- Only the 12-hour frequency conflict is retryable by design: the next
-        -- scheduler tick re-runs it once the window opens, and no partial
-        -- notification fan-out is committed for the failed announcement. Any
-        -- other failure must surface as a pg_cron job failure instead of being
-        -- swallowed here.
-        IF SQLSTATE <> 'P1500' THEN
-          RAISE;
+        -- P1500 = 12h frequency conflict: retried next tick, never partially
+        -- fan-out. Any other failure is isolated to this row with a WARNING so
+        -- one permanently ineligible announcement can neither abort the queue
+        -- nor vanish silently; the row stays host-controlled and visibly retrying.
+        IF SQLSTATE = 'P1500' THEN
+          NULL;
+        ELSE
+          RAISE WARNING 'publish_due_event_announcements skipped announcement % ([%] %)', announcement_id, SQLSTATE, SQLERRM;
         END IF;
     END;
   END LOOP;
