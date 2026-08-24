@@ -177,7 +177,18 @@ jobs:
             if printf '%s' "$cd_files" | touches_cd_paths; then will_deploy=1; fi
 
             # CAS merge：以 expected-head sha 原子拒絕 head 已變動的合併
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || { detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0; }
+            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控；
+            # 否則視為 rejected（head moved / API 錯誤），本次無新部署事實
+            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
+            if [ -z "$sha" ]; then
+              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
+              else
+                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
+              fi
+            fi
             result="released"
 
             if [ "$will_deploy" -eq 0 ]; then
@@ -326,7 +337,17 @@ jobs:
               result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
             fi
 
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || { detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0; }
+            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控
+            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
+            if [ -z "$sha" ]; then
+              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
+              else
+                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
+              fi
+            fi
             result="released"
           fi
 
@@ -467,7 +488,17 @@ jobs:
             done
             [ "$ok" -eq 1 ] || continue
 
-            merged="$(gh api -X PUT "repos/$REPO/pulls/$n/merge" -f merge_method=merge -f sha="$expect" --jq '.sha' 2>/dev/null)" || { detail+="PR #$n merge rejected (head moved since snapshot); "; continue; }
+            # 回應遺失 ≠ 合併失敗：以 PR 狀態調和，已 MERGED 取回 merge commit 計入發版
+            merged="$(gh api -X PUT "repos/$REPO/pulls/$n/merge" -f merge_method=merge -f sha="$expect" --jq '.sha' 2>/dev/null)" || true
+            if [ -z "$merged" ]; then
+              pr_state="$(gh pr view "$n" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                merged="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail+="PR #$n merge response lost; recovered commit $merged; "
+              else
+                detail+="PR #$n merge rejected (head moved since snapshot); "; continue
+              fi
+            fi
             last_pr="$n"; last_sha="$merged"; merged_count=$((merged_count+1))
             detail+="merged approved PR #$n ($merged); "
           done
