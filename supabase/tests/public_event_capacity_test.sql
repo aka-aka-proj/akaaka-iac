@@ -28,7 +28,7 @@ SELECT ok(
 
 SELECT ok(
   pg_get_function_result('public.get_event_capacity(uuid)'::regprocedure)
-    = 'record',
+    = 'TABLE(approved_registration_count bigint, capacity_external_guest_count bigint)',
   'capacity resolver returns a composite aggregate record'
 );
 

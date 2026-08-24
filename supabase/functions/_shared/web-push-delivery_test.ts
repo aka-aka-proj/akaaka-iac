@@ -25,6 +25,9 @@ Deno.test('payload allowlist maps all notification types without private content
   const follow = buildMinimalPushPayload({ notificationId, notificationType: 'new_follow', actorProfileId: profileId })
   if (follow.target.kind !== 'profile' || follow.target.id !== profileId) throw new Error('unexpected follow payload')
 
+  const announcement = buildMinimalPushPayload({ notificationId, notificationType: 'event_announcement', eventId })
+  if (announcement.target.kind !== 'event' || announcement.target.id !== eventId) throw new Error('unexpected announcement payload')
+
   for (const notificationType of ['new_issue', 'venue_application'] as const) {
     const payload = buildMinimalPushPayload({ notificationId, notificationType })
     if (payload.target.kind !== 'notifications' || 'id' in payload.target) throw new Error('unexpected private notification target')

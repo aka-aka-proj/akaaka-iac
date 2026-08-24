@@ -18,8 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      DELIVERY_PROJECT_REF: ${{ github.ref == 'refs/heads/main' && secrets.SUPABASE_PROJECT_REF || secrets.SUPABASE_PROJECT_REF_PREVIEW }}
-      DELIVERY_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PUSH_DELIVERY_TOKEN || secrets.PUSH_DELIVERY_TOKEN_PREVIEW }}
+      # Keep the ref selection explicit. The final empty fallback prevents a
+      # missing production secret from selecting the preview secret through
+      # GitHub's `a && b || c` truthiness semantics.
+      DELIVERY_PROJECT_REF: ${{ github.ref == 'refs/heads/main' && secrets.SUPABASE_PROJECT_REF || github.ref == 'refs/heads/preview' && secrets.SUPABASE_PROJECT_REF_PREVIEW || '' }}
+      DELIVERY_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PUSH_DELIVERY_TOKEN || github.ref == 'refs/heads/preview' && secrets.PUSH_DELIVERY_TOKEN_PREVIEW || '' }}
     steps:
       - name: Validate scheduler target
         env:
@@ -68,11 +71,11 @@ jobs:
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
           {
             echo "## Web Push delivery"
-            echo "- Environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}"
+            echo "- Environment: ${{ github.ref == 'refs/heads/main' && 'production' || github.ref == 'refs/heads/preview' && 'staging' || 'unknown' }}"
             echo "- HTTP status: $http_code"
             echo "- Summary: \`$summary\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          if jq -e '.dead_letter > 0' "$response_file" >/dev/null; then
-            echo "Delivery worker reported dead-letter jobs."
+          if jq -e '.dead_letter > 0 or .skipped > 0' "$response_file" >/dev/null; then
+            echo "Delivery worker reported dead-letter or skipped jobs."
             exit 1
           fi

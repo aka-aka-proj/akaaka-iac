@@ -15,7 +15,13 @@ type DeliveryRow = {
   notification_id: string;
   push_subscription_id: string;
   attempts: number;
-  notification_type: "new_event" | "new_issue" | "new_follow" | "venue_application" | "event_invitation";
+  notification_type:
+    | "new_event"
+    | "new_issue"
+    | "new_follow"
+    | "venue_application"
+    | "event_invitation"
+    | "event_announcement";
   event_id: string | null;
   actor_profile_id: string | null;
   venue_application_profile_id: string | null;
@@ -56,16 +62,23 @@ function constantTimeEqual(left: string, right: string): boolean {
 function providerStatus(error: unknown): number | undefined {
   if (!error || typeof error !== "object") return undefined;
   const value = (error as { statusCode?: unknown }).statusCode;
-  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+  return typeof value === "number" && Number.isInteger(value)
+    ? value
+    : undefined;
 }
 
 function stableErrorCode(status: number | undefined): string {
-  return status === undefined ? "provider_network_error" : `provider_http_${status}`;
+  return status === undefined
+    ? "provider_network_error"
+    : `provider_http_${status}`;
 }
 
 function parseLimit(value: unknown): number {
   if (value === undefined) return DEFAULT_LIMIT;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_LIMIT) {
+  if (
+    typeof value !== "number" || !Number.isInteger(value) || value < 1 ||
+    value > MAX_LIMIT
+  ) {
     throw new Error("invalid_delivery_limit");
   }
   return value;
@@ -73,7 +86,9 @@ function parseLimit(value: unknown): number {
 
 function parseNow(value: unknown): string {
   if (value === undefined) return new Date().toISOString();
-  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) throw new Error("invalid_delivery_now");
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new Error("invalid_delivery_now");
+  }
   return new Date(value).toISOString();
 }
 
@@ -112,6 +127,7 @@ async function processDelivery(
     return "dead_letter";
   }
 
+  let status: number | undefined;
   try {
     const response = await webpush.sendNotification(
       {
@@ -121,53 +137,85 @@ async function processDelivery(
       JSON.stringify(payload),
       { TTL: 60 },
     );
-    const outcome = classifyProviderResponse(response.statusCode);
-    if (outcome === "success") {
-      await updateDelivery(admin, row.delivery_id, {
-        status: "sent",
-        sent_at: now,
-        last_error_code: null,
-      });
-      return "sent";
-    }
-    throw Object.assign(new Error("provider_response"), { statusCode: response.statusCode });
+    status = response.statusCode;
   } catch (error) {
-    const status = providerStatus(error);
-    const outcome = classifyProviderResponse(status ?? 503);
-    const errorCode = stableErrorCode(status);
-    if (outcome === "endpoint_invalid") {
-      await admin.from("push_subscriptions").delete().eq("id", row.push_subscription_id);
-      await updateDelivery(admin, row.delivery_id, {
-        status: "endpoint_invalid",
-        last_error_code: errorCode,
-      });
-      return "endpoint_invalid";
-    }
+    status = providerStatus(error);
+  }
 
-    if (outcome === "retryable" && row.attempts < MAX_ATTEMPTS) {
-      const nextAvailable = new Date(Date.parse(now) + retryDelayMs(row.attempts)).toISOString();
-      await updateDelivery(admin, row.delivery_id, {
-        status: "pending",
-        available_at: nextAvailable,
-        last_error_code: errorCode,
-      });
-      return "retryable";
-    }
-
+  const outcome = classifyProviderResponse(status ?? 503);
+  if (outcome === "success") {
     await updateDelivery(admin, row.delivery_id, {
-      status: "dead_letter",
+      status: "sent",
+      sent_at: now,
+      last_error_code: null,
+    });
+    return "sent";
+  }
+
+  const errorCode = stableErrorCode(status);
+  if (outcome === "endpoint_invalid") {
+    const { error: deleteError } = await admin
+      .from("push_subscriptions")
+      .delete()
+      .eq("id", row.push_subscription_id);
+    if (deleteError) {
+      // Never leave the delivery in `processing`: the scheduler re-claims
+      // stale processing rows every 5 minutes, so throwing here loops
+      // provider calls forever. Defer under the cap, then dead-letter.
+      const deleteErrorCode = "subscription_delete_failed";
+      if (row.attempts < MAX_ATTEMPTS) {
+        const nextAvailable = new Date(
+          Date.parse(now) + retryDelayMs(row.attempts),
+        ).toISOString();
+        await updateDelivery(admin, row.delivery_id, {
+          status: "pending",
+          available_at: nextAvailable,
+          last_error_code: deleteErrorCode,
+        });
+        return "retryable";
+      }
+      await updateDelivery(admin, row.delivery_id, {
+        status: "dead_letter",
+        last_error_code: deleteErrorCode,
+      });
+      return "dead_letter";
+    }
+    await updateDelivery(admin, row.delivery_id, {
+      status: "endpoint_invalid",
       last_error_code: errorCode,
     });
-    return "dead_letter";
+    return "endpoint_invalid";
   }
+
+  if (outcome === "retryable" && row.attempts < MAX_ATTEMPTS) {
+    const nextAvailable = new Date(Date.parse(now) + retryDelayMs(row.attempts))
+      .toISOString();
+    await updateDelivery(admin, row.delivery_id, {
+      status: "pending",
+      available_at: nextAvailable,
+      last_error_code: errorCode,
+    });
+    return "retryable";
+  }
+
+  await updateDelivery(admin, row.delivery_id, {
+    status: "dead_letter",
+    last_error_code: errorCode,
+  });
+  return "dead_letter";
 }
 
 Deno.serve(async (request) => {
-  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  if (request.method !== "POST") {
+    return json({ error: "method_not_allowed" }, 405);
+  }
 
   const expectedToken = Deno.env.get("PUSH_DELIVERY_TOKEN");
   const authorization = request.headers.get("Authorization");
-  if (!expectedToken || !authorization?.startsWith("Bearer ") || !constantTimeEqual(authorization.slice(7), expectedToken)) {
+  if (
+    !expectedToken || !authorization?.startsWith("Bearer ") ||
+    !constantTimeEqual(authorization.slice(7), expectedToken)
+  ) {
     return json({ error: "unauthorized" }, 401);
   }
 
@@ -176,7 +224,10 @@ Deno.serve(async (request) => {
   const vapidSubject = Deno.env.get("VAPID_SUBJECT");
   const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY");
   const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY");
-  if (!supabaseUrl || !serviceRoleKey || !vapidSubject || !vapidPublicKey || !vapidPrivateKey) {
+  if (
+    !supabaseUrl || !serviceRoleKey || !vapidSubject || !vapidPublicKey ||
+    !vapidPrivateKey
+  ) {
     return json({ error: "delivery_not_configured" }, 500);
   }
 
@@ -193,15 +244,20 @@ Deno.serve(async (request) => {
     limit = parseLimit(body.limit);
     now = parseNow(body.now);
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "invalid_request" }, 400);
+    return json({
+      error: error instanceof Error ? error.message : "invalid_request",
+    }, 400);
   }
 
   webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
   const admin = createClient(supabaseUrl, serviceRoleKey);
-  const { data: rows, error } = await admin.rpc("claim_notification_push_deliveries", {
-    p_limit: limit,
-    p_now: now,
-  });
+  const { data: rows, error } = await admin.rpc(
+    "claim_notification_push_deliveries",
+    {
+      p_limit: limit,
+      p_now: now,
+    },
+  );
   if (error) return json({ error: "delivery_claim_failed" }, 503);
 
   const summary: DeliverySummary = {
