@@ -154,10 +154,32 @@ async function processDelivery(
 
   const errorCode = stableErrorCode(status);
   if (outcome === "endpoint_invalid") {
-    await admin.from("push_subscriptions").delete().eq(
-      "id",
-      row.push_subscription_id,
-    );
+    const { error: deleteError } = await admin
+      .from("push_subscriptions")
+      .delete()
+      .eq("id", row.push_subscription_id);
+    if (deleteError) {
+      // Never leave the delivery in `processing`: the scheduler re-claims
+      // stale processing rows every 5 minutes, so throwing here loops
+      // provider calls forever. Defer under the cap, then dead-letter.
+      const deleteErrorCode = "subscription_delete_failed";
+      if (row.attempts < MAX_ATTEMPTS) {
+        const nextAvailable = new Date(
+          Date.parse(now) + retryDelayMs(row.attempts),
+        ).toISOString();
+        await updateDelivery(admin, row.delivery_id, {
+          status: "pending",
+          available_at: nextAvailable,
+          last_error_code: deleteErrorCode,
+        });
+        return "retryable";
+      }
+      await updateDelivery(admin, row.delivery_id, {
+        status: "dead_letter",
+        last_error_code: deleteErrorCode,
+      });
+      return "dead_letter";
+    }
     await updateDelivery(admin, row.delivery_id, {
       status: "endpoint_invalid",
       last_error_code: errorCode,
