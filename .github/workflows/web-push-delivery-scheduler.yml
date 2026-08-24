@@ -64,10 +64,11 @@ jobs:
             (.sent | type == "number") and
             (.retryable | type == "number") and
             (.endpoint_invalid | type == "number") and
+            (.cancelled | type == "number") and
             (.dead_letter | type == "number") and
             (.skipped | type == "number")
           ' "$response_file" >/dev/null
-          summary="$(jq -c '{claimed, sent, retryable, endpoint_invalid, dead_letter, skipped}' "$response_file")"
+          summary="$(jq -c '{claimed, sent, retryable, endpoint_invalid, cancelled, dead_letter, skipped}' "$response_file")"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
           {
             echo "## Web Push delivery"
