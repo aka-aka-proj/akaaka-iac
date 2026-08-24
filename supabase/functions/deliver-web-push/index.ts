@@ -20,7 +20,8 @@ type DeliveryRow = {
     | "new_issue"
     | "new_follow"
     | "venue_application"
-    | "event_invitation";
+    | "event_invitation"
+    | "event_announcement";
   event_id: string | null;
   actor_profile_id: string | null;
   venue_application_profile_id: string | null;
