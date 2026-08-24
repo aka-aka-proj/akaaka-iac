@@ -222,7 +222,11 @@ jobs:
     timeout-minutes: 10
     if: github.event_name == 'pull_request'
     env:
-      GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+      # 同 repo 的 body/files 讀取用 github.token 即可；AKA_REPO_TOKEN 僅在
+      # 宣告引用 akaaka-docs PR 時（跨 repo 合併狀態驗證）才需要，缺漏時於
+      # 步驟內顯式報錯而非讓所有 gh 呼叫以 exit 4 空白崩潰
+      GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN || github.token }}
+      CROSS_REPO_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       DOCS_REPO: aka-aka-proj/akaaka-docs
     steps:
@@ -293,6 +297,9 @@ jobs:
             fail "PR body is missing the required 'Docs:' declaration ('Docs: none' or akaaka-docs PR numbers). Contract: docs-first binding in 001-vercel-deployment-spec.md."
           fi
           if [ "$(printf '%s' "$docs_decl" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "none" ]; then
+            if [ -z "$CROSS_REPO_TOKEN" ]; then
+              fail "AKA_REPO_TOKEN secret is required to validate akaaka-docs dependency merge state; set it or declare 'Docs: none' when no docs change is needed"
+            fi
             for dnum in $(printf '%s' "$docs_decl" | tr ',' ' '); do
               case "$dnum" in ''|*[!0-9]*) fail "Docs reference '$dnum' is not an akaaka-docs PR number" ;; esac
               stamp="$(gh api "repos/$DOCS_REPO/pulls/$dnum" --jq '[(.state // ""),((.merged // false)|tostring),(.base.ref // "")] | @tsv' 2>/dev/null)" \
