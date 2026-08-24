@@ -379,7 +379,13 @@ jobs:
               detail="$detail; SPA route smoke check passed"
             fi
           fi
-          exit 0
+          # 部署失敗／逾時必須讓 stage 失敗，GitHub Actions 才會 skip 下游 stage，落實「第一個失敗即中止」的發佈順序
+          case "$deploy" in
+            failed|timeout)
+              exit 1 ;;
+            *)
+              exit 0 ;;
+          esac
 
   release-docs:
     name: Release akaaka-docs
@@ -425,8 +431,9 @@ jobs:
           for row in "${rows[@]}"; do
             n="${row%%$'\t'*}"; expect="${row##*$'\t'}"
 
-            # 僅計人類核准（排除 Bot/App reviewer），落實「人工 APPROVED 才可合併」契約
-            approvals="$(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not))] | length')"
+            # 僅計具寫入權限帳號的核准（author association OWNER/MEMBER/COLLABORATOR）：排除 bot，
+            # 也排除公開 repo 外部帳號的自核准，落實「具寫入權限者 APPROVED 才可合併」契約
+            approvals="$(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not)) | select((.authorAssociation // "NONE") as $a | $a == "OWNER" or $a == "MEMBER" or $a == "COLLABORATOR")] | length')"
             if [ "${approvals:-0}" -eq 0 ]; then
               detail+="PR #$n skipped (awaiting human approval); "
               continue
@@ -561,12 +568,13 @@ jobs:
             --arg dr "${{ needs.release-docs.outputs.result }}" --arg dsha "${{ needs.release-docs.outputs.sha }}" --arg ddep "${{ needs.release-docs.outputs.deploy }}" \
             '{iac:{result:$ir,sha:$isha,deploy:$idep}, frontend:{result:$fr,sha:$fsha,deploy:$fdep}, docs:{result:$dr,sha:$dsha,deploy:$ddep}}')"
 
-          # skipped/abort 的 stage 本次無新事實：保留既有 checkpoint，以免清掉待 resume 的失敗紀錄
+          # 無新部署事實的 stage（result 空／aborted，或本次沒有合併 SHA：暫時性 API 失敗、dry-run、no-changes）
+          # 不得覆寫 checkpoint——空資料會清掉待 resume 的失敗紀錄，後續 run 誤判無可續行部署而永久漏部署
           if printf '%s' "$prev_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
             state="$(printf '%s' "$state" | jq -c --argjson prev "$prev_json" '
-              .iac = (if ((.iac.result // "") == "" or .iac.result == "aborted") then ($prev.iac // .iac) else .iac end) |
-              .frontend = (if ((.frontend.result // "") == "" or .frontend.result == "aborted") then ($prev.frontend // .frontend) else .frontend end) |
-              .docs = (if ((.docs.result // "") == "" or .docs.result == "aborted") then ($prev.docs // .docs) else .docs end)
+              .iac = (if ((.iac.result // "") == "" or .iac.result == "aborted" or (.iac.sha // "") == "") then ($prev.iac // .iac) else .iac end) |
+              .frontend = (if ((.frontend.result // "") == "" or .frontend.result == "aborted" or (.frontend.sha // "") == "") then ($prev.frontend // .frontend) else .frontend end) |
+              .docs = (if ((.docs.result // "") == "" or .docs.result == "aborted" or (.docs.sha // "") == "") then ($prev.docs // .docs) else .docs end)
             ')"
           fi
 
