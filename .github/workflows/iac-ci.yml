@@ -12,6 +12,7 @@ on:
       - "cloudflare/**"
       - ".github/workflows/iac-ci.yml"
       - ".github/workflows/web-push-delivery-scheduler.yml"
+      - ".github/workflows/web-push-cleanup-scheduler.yml"
   workflow_dispatch:
 
 permissions:
@@ -124,6 +125,32 @@ jobs:
             echo "search_events must remain SECURITY INVOKER"
             exit 1
           fi
+
+      - name: Check push subscription hygiene boundary
+        if: matrix.target.name == 'migrations'
+        run: |
+          hygiene="supabase/migrations/20260825000000_push_subscription_hygiene.sql"
+
+          for required in \
+            "push_subscriptions_endpoint_unique UNIQUE (endpoint)" \
+            "SECURITY DEFINER" \
+            "SET search_path = public, extensions" \
+            "REVOKE ALL ON FUNCTION public.subscribe_push_subscription(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC" \
+            "GRANT EXECUTE ON FUNCTION public.subscribe_push_subscription(TEXT, TEXT, TEXT, TEXT) TO authenticated" \
+            "REVOKE ALL ON FUNCTION public.cleanup_stale_push_subscriptions(INTEGER) FROM PUBLIC" \
+            "GRANT EXECUTE ON FUNCTION public.cleanup_stale_push_subscriptions(INTEGER) TO service_role"; do
+            if ! grep -Fq "$required" "$hygiene"; then
+              echo "Missing push subscription hygiene contract: $required"
+              exit 1
+            fi
+          done
+
+          for forbidden in pg_net http; do
+            if grep -Fq "$forbidden" "$hygiene"; then
+              echo "Forbidden external-network pattern in hygiene migration: $forbidden"
+              exit 1
+            fi
+          done
 
       - name: Check independent deletion ledger bootstrap boundary
         if: matrix.target.name == 'functions'

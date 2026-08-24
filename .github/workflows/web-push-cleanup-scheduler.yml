@@ -1,0 +1,73 @@
+name: Web Push subscription cleanup scheduler
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-push-cleanup-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete stale Web Push subscriptions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Keep the ref selection explicit. The final empty fallback prevents a
+      # missing production secret from selecting the preview secret through
+      # GitHub's `a && b || c` truthiness semantics.
+      CLEANUP_PROJECT_REF: ${{ github.ref == 'refs/heads/main' && secrets.SUPABASE_PROJECT_REF || github.ref == 'refs/heads/preview' && secrets.SUPABASE_PROJECT_REF_PREVIEW || '' }}
+      CLEANUP_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.PUSH_DELIVERY_TOKEN || github.ref == 'refs/heads/preview' && secrets.PUSH_DELIVERY_TOKEN_PREVIEW || '' }}
+    steps:
+      - name: Validate cleanup target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "schedule" ] && [ "$REF_NAME" != "refs/heads/main" ]; then
+            echo "Scheduled cleanup is only allowed on main."
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$REF_NAME" != "refs/heads/preview" ] && [ "$REF_NAME" != "refs/heads/main" ]; then
+            echo "Manual cleanup is only allowed on preview or main."
+            exit 1
+          fi
+          [ -n "$CLEANUP_PROJECT_REF" ] || { echo "Missing cleanup project ref"; exit 1; }
+          [ -n "$CLEANUP_TOKEN" ] || { echo "Missing cleanup token secret"; exit 1; }
+
+      - name: Invoke cleanup worker
+        id: cleanup
+        env:
+          CLEANUP_URL: https://${{ env.CLEANUP_PROJECT_REF }}.supabase.co/functions/v1/cleanup-push-subscriptions
+        run: |
+          set -euo pipefail
+          response_file="$RUNNER_TEMP/web-push-cleanup-response.json"
+          http_code="$(curl --fail-with-body --silent --show-error --location \
+            --retry 2 --retry-all-errors --retry-delay 2 \
+            --output "$response_file" --write-out '%{http_code}' \
+            --request POST "$CLEANUP_URL" \
+            --header "Authorization: Bearer $CLEANUP_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{}')"
+          if [ "$http_code" != "200" ]; then
+            echo "Cleanup worker returned HTTP $http_code"
+            exit 1
+          fi
+          jq -e '
+            (.deleted | type == "number") and
+            (.stale_days | type == "number")
+          ' "$response_file" >/dev/null
+          summary="$(jq -c '{deleted, stale_days}' "$response_file")"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Web Push subscription cleanup"
+            echo "- Environment: ${{ github.ref == 'refs/heads/main' && 'production' || github.ref == 'refs/heads/preview' && 'staging' || 'unknown' }}"
+            echo "- HTTP status: $http_code"
+            echo "- Summary: \`$summary\`"
+          } >> "$GITHUB_STEP_SUMMARY"
