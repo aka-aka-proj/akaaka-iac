@@ -78,6 +78,8 @@ Deno.serve(async (req: Request) => {
         creator_id: parentEvent.creator_id,
         title: parentEvent.title,
         description: parentEvent.description,
+        attendance_fee_type: parentEvent.attendance_fee_type ?? 'free',
+        attendance_fee_amount: parentEvent.attendance_fee_amount,
         category: parentEvent.category || 'Social',
         event_type: parentEvent.event_type,
         is_venue_hosted: parentEvent.is_venue_hosted,
