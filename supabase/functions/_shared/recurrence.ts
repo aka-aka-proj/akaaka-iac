@@ -37,11 +37,6 @@ export class RecurrenceSeriesTooLongError extends Error {
   }
 }
 
-// Legacy payloads (no `timezone`, required `count`, optional `until` alongside it)
-// stay valid until the revised frontend ships to production — flip this off then
-// (spec「部署相容期」, tracked in supabase/functions/DEPLOYMENT-NOTES.md).
-const LEGACY_PAYLOAD_COMPAT_ENABLED = true
-
 // Hard guards so generators always terminate even when callers bypass validation;
 // validated input always terminates earlier via the count/until/series-cap checks.
 const MAX_WEEK_STEPS = 5200
@@ -188,22 +183,17 @@ export function validateRecurrenceRule(rule: UnvalidatedRecurrenceRule): string 
     return 'until must be a valid timestamp'
   }
 
-  const newStylePayload = rule.timezone !== undefined && rule.timezone !== null
-  if (newStylePayload || !LEGACY_PAYLOAD_COMPAT_ENABLED) {
-    if (typeof rule.timezone !== 'string' || !isValidTimeZone(rule.timezone)) {
-      return 'timezone must be a valid IANA time zone name'
+  // Strict path for every payload since the compat period ended (spec「部署相容期」).
+  if (typeof rule.timezone !== 'string' || !isValidTimeZone(rule.timezone)) {
+    return 'timezone must be a valid IANA time zone name'
+  }
+  if ((rule.count !== undefined) === hasUntil) {
+    return 'provide either count or until, not both'
+  }
+  for (const key of Object.keys(rule)) {
+    if (!modeAllowedFields(rule).has(key)) {
+      return `field "${key}" is not allowed for ${rule.frequency} recurrence`
     }
-    if ((rule.count !== undefined) === hasUntil) {
-      return 'provide either count or until, not both'
-    }
-    for (const key of Object.keys(rule)) {
-      if (!modeAllowedFields(rule).has(key)) {
-        return `field "${key}" is not allowed for ${rule.frequency} recurrence`
-      }
-    }
-  } else if (rule.count === undefined) {
-    // Legacy contract: count is required, until optional alongside it.
-    return 'count must be an integer between 1 and 52'
   }
 
   if (rule.week_ordinal !== undefined && !(rule.frequency === 'monthly' && rule.monthly_by === 'weekday')) {
