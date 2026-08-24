@@ -560,7 +560,18 @@ jobs:
           set -uo pipefail
           REPO="${GITHUB_REPOSITORY}"
           BRANCH="$RELEASE_STATE_BRANCH"
-          prev_json="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
+          # 讀取既有 checkpoint：必須區分「檔案尚不存在（HTTP 404，可正常 bootstrap）」與
+          # 「API 錯誤／內容無法取得（狀態不可靠）」。後者直接跳過寫入——若以本次資料覆寫，
+          # 可能清掉待 resume 的失敗部署紀錄，讓未套用的 production migration 永久漏部署
+          prev_err="$(mktemp)"
+          prev_b64="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>"$prev_err")" || true
+          if [ -s "$prev_err" ] && ! grep -q 'HTTP 404' "$prev_err"; then
+            echo "::warning::cannot reliably read previous checkpoint ($(tr '\n' ' ' <"$prev_err")); skipping checkpoint write to preserve pending release state"
+            rm -f "$prev_err"
+            exit 0
+          fi
+          rm -f "$prev_err"
+          prev_json="$(printf '%s' "$prev_b64" | base64 -d 2>/dev/null || true)"
 
           state="$(jq -n \
             --arg ir "${{ needs.release-iac.outputs.result }}" --arg isha "${{ needs.release-iac.outputs.sha }}" --arg idep "${{ needs.release-iac.outputs.deploy }}" \
