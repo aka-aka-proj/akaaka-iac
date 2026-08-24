@@ -67,10 +67,10 @@ jobs:
           SUPABASE_TELEMETRY_DISABLED: "true"
         run: |
           supabase db start
-          for test_file in supabase/tests/*.sql; do
+          while IFS= read -r -d '' test_file; do
             echo "Running $test_file"
             supabase test db --local "$test_file"
-          done
+          done < <(find supabase/tests -type f -name '*.sql' -print0 | sort -z)
 
       - name: Stop local Supabase
         if: always() && matrix.target.name == 'migrations'
