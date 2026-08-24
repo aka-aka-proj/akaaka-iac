@@ -307,6 +307,15 @@ Deno.test('V19 timezone must be a valid IANA name on new-style payloads; legacy 
   )
 })
 
+Deno.test('V21 monthly by-date steps by interval months from the base event', () => {
+  const dates = generateRecurringDates(new Date('2026-03-15T09:00:00.000Z'), { frequency: 'monthly', interval: 2, count: 4 })
+  assertEquals(dates.map((date) => date.toISOString()), [
+    '2026-05-15T09:00:00.000Z',
+    '2026-07-15T09:00:00.000Z',
+    '2026-09-15T09:00:00.000Z',
+  ])
+})
+
 Deno.test('V20 legacy count and until coexist: filter by until first, then truncate by count', () => {
   const base = new Date('2026-08-10T12:00:00.000Z')
   const boundedByUntil = generateRecurringDates(base, {
