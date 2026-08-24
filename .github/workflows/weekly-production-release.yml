@@ -378,7 +378,7 @@ jobs:
           run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           html="<html><body style='font-family:sans-serif'>"
           html+="<h2>AkaAka Weekly Production Release — ${overall}</h2>"
-          html+="<p>Scheduled Friday 08:00 Asia/Taipei release. Run: <a href='${run_url}'>${run_url}</a></p>"
+          html+="<p>Scheduled Friday 08:19 Asia/Taipei release. Run: <a href='${run_url}'>${run_url}</a></p>"
           html+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:14px'>"
           html+="<tr style='background:#f0f0f0'><th>Repo</th><th>Result</th><th>Deploy</th><th>PR</th><th>Merged SHA</th><th>Detail</th></tr>"
           html+="${rows}</table>"
