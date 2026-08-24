@@ -112,10 +112,13 @@ Deno.test('V6 until keeps candidates on or before the cutoff', () => {
 
 Deno.test('V7 count and until are mutually exclusive and at least one is required', () => {
   assertEquals(
-    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 4, until: '2026-04-15T00:00:00.000Z' }),
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 4, until: '2026-04-15T00:00:00.000Z', timezone: 'UTC' }),
     'provide either count or until, not both',
   )
-  assertEquals(validateRecurrenceRule({ frequency: 'weekly', interval: 1 }), 'provide either count or until, not both')
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, timezone: 'UTC' }),
+    'provide either count or until, not both',
+  )
 })
 
 Deno.test('V8 monthly weekday skips a candidate identical to the base event', () => {
@@ -188,10 +191,6 @@ Deno.test('V12 validation rejects non-string or empty until values', () => {
   for (const until of [0, false, '', 123]) {
     assertEquals(validateRecurrenceRule(ruleWithUntil(until)), 'until must be a valid timestamp')
   }
-  assertEquals(
-    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 4, until: '2026-04-15T00:00:00.000Z' }),
-    'provide either count or until, not both',
-  )
 })
 
 Deno.test('V12b generation applies a non-string until as a real cutoff instead of ignoring it', () => {
@@ -220,4 +219,107 @@ Deno.test('V14 until series of exactly 52 total events succeeds', () => {
     until: '2027-08-02T12:00:00.000Z',
   })
   assertEquals(dates.length, 51)
+})
+
+Deno.test('V15 weekly weekdays are resolved in the rule timezone, not UTC', () => {
+  const base = new Date('2026-08-10T17:30:00.000Z') // Mon 16:30Z = Tue 01:30 Asia/Taipei
+  const tuesdays = generateRecurringDates(base, { frequency: 'weekly', interval: 1, days: ['Tue'], count: 4, timezone: 'Asia/Taipei' })
+  assertEquals(tuesdays.map((date) => date.toISOString()), [
+    '2026-08-17T17:30:00.000Z',
+    '2026-08-24T17:30:00.000Z',
+    '2026-08-31T17:30:00.000Z',
+  ])
+  const mondays = generateRecurringDates(base, { frequency: 'weekly', interval: 1, days: ['Mon'], count: 3, timezone: 'Asia/Taipei' })
+  assertEquals(mondays.map((date) => date.toISOString()), [
+    '2026-08-16T17:30:00.000Z',
+    '2026-08-23T17:30:00.000Z',
+  ])
+})
+
+Deno.test('V16 monthly by-date clamps to the end of short months in the rule timezone', () => {
+  const dates = generateRecurringDates(new Date('2026-01-31T04:00:00.000Z'), {
+    frequency: 'monthly',
+    interval: 1,
+    count: 4,
+    timezone: 'Asia/Taipei',
+  })
+  assertEquals(dates.map((date) => date.toISOString()), [
+    '2026-02-28T04:00:00.000Z',
+    '2026-03-31T04:00:00.000Z',
+    '2026-04-30T04:00:00.000Z',
+  ])
+})
+
+Deno.test('V17 monthly nth-weekday candidates strictly after the base instant across time zones', () => {
+  const dates = generateRecurringDates(new Date('2026-03-15T16:30:00.000Z'), {
+    frequency: 'monthly',
+    monthly_by: 'weekday',
+    week_ordinal: 3,
+    days: ['Mon'],
+    interval: 1,
+    count: 4,
+    timezone: 'Asia/Taipei',
+  })
+  assertEquals(dates.map((date) => date.toISOString()), [
+    '2026-04-19T16:30:00.000Z',
+    '2026-05-17T16:30:00.000Z',
+    '2026-06-14T16:30:00.000Z',
+  ])
+})
+
+function ruleWithExtraFields(fields: Record<string, unknown>): UnvalidatedRecurrenceRule {
+  return { ...fields } as unknown as UnvalidatedRecurrenceRule
+}
+
+Deno.test('V18 new-style rules reject fields outside their mode whitelist', () => {
+  assertEquals(
+    validateRecurrenceRule(ruleWithExtraFields({
+      frequency: 'weekly', interval: 1, monthly_by: 'weekday', week_ordinal: 2, days: ['Mon'], count: 2, timezone: 'UTC',
+    })),
+    'field "monthly_by" is not allowed for weekly recurrence',
+  )
+  assertEquals(
+    validateRecurrenceRule(ruleWithExtraFields({
+      frequency: 'monthly', monthly_by: 'date', interval: 1, days: ['Mon'], count: 2, timezone: 'UTC',
+    })),
+    'field "days" is not allowed for monthly recurrence',
+  )
+  assertEquals(
+    validateRecurrenceRule(ruleWithExtraFields({
+      frequency: 'weekly', intervl: 3, interval: 1, count: 2, timezone: 'UTC',
+    })),
+    'field "intervl" is not allowed for weekly recurrence',
+  )
+})
+
+Deno.test('V19 timezone must be a valid IANA name on new-style payloads; legacy payloads stay valid', () => {
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 2, timezone: 'Mars/Olympus' }),
+    'timezone must be a valid IANA time zone name',
+  )
+  assertEquals(
+    validateRecurrenceRule(ruleWithExtraFields({ frequency: 'weekly', interval: 1, count: 2, timezone: 123 })),
+    'timezone must be a valid IANA time zone name',
+  )
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 4, until: '2026-09-30T00:00:00.000Z' }),
+    null,
+  )
+})
+
+Deno.test('V20 legacy count and until coexist: filter by until first, then truncate by count', () => {
+  const base = new Date('2026-08-10T12:00:00.000Z')
+  const boundedByUntil = generateRecurringDates(base, {
+    frequency: 'weekly', interval: 1, count: 4, until: '2026-08-24T12:00:00.000Z',
+  })
+  assertEquals(boundedByUntil.map((date) => date.toISOString()), [
+    '2026-08-17T12:00:00.000Z',
+    '2026-08-24T12:00:00.000Z',
+  ])
+  const truncatedByCount = generateRecurringDates(base, {
+    frequency: 'weekly', interval: 1, count: 2, until: '2027-01-01T00:00:00.000Z',
+  })
+  assertEquals(truncatedByCount.map((date) => date.toISOString()), [
+    '2026-08-17T12:00:00.000Z',
+  ])
 })
