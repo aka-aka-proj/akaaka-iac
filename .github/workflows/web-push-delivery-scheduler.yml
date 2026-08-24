@@ -75,7 +75,7 @@ jobs:
             echo "- HTTP status: $http_code"
             echo "- Summary: \`$summary\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          if jq -e '.dead_letter > 0' "$response_file" >/dev/null; then
-            echo "Delivery worker reported dead-letter jobs."
+          if jq -e '.dead_letter > 0 or .skipped > 0' "$response_file" >/dev/null; then
+            echo "Delivery worker reported dead-letter or skipped jobs."
             exit 1
           fi
