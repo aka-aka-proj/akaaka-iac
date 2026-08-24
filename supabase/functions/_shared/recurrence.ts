@@ -290,7 +290,7 @@ function monthAfter(context: CalendarContext, occurrence: number): CalendarDate 
 
 function* monthlyByDateCandidates(context: CalendarContext, interval: number): Generator<Date> {
   const sourceDay = context.baseDate.day
-  for (let occurrence = 1, step = 0; step < MAX_MONTH_STEPS; occurrence += interval, step += 1) {
+  for (let occurrence = interval, step = 0; step < MAX_MONTH_STEPS; occurrence += interval, step += 1) {
     const month = monthAfter(context, occurrence)
     const day = Math.min(sourceDay, daysInMonth(month.year, month.month))
     yield context.toInstant({ ...month, day })
