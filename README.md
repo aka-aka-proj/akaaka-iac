@@ -31,10 +31,12 @@ IaC (本 repo, Supabase) -> Backend -> Frontend (Vercel)
 
 觸發條件：PR 到 `main` 且變更包含：
 - `supabase/migrations/**`
+- `supabase/tests/**`
 - `supabase/functions/**`
 
 檢查內容：
 - `supabase/migrations` 路徑存在，且 migration 檔名符合 `YYYYMMDDHHMMSS_description.sql`
+- `supabase/tests` 下所有 `.sql`（含子目錄）皆為本地 pgTAP 契約測試：在本地 Supabase 逐一執行 `supabase test db --local <file>`，任一套件失敗即擋下 PR
 - `supabase/functions` 路徑存在，且每個可部署 function 目錄至少有 `index.ts` 或 `index.js`；`_shared` 為共用模組，不是可部署 function
 
 ### Preview → Main 發版流程

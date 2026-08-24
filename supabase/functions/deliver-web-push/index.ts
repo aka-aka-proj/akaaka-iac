@@ -126,6 +126,7 @@ async function processDelivery(
     return "dead_letter";
   }
 
+  let status: number | undefined;
   try {
     const response = await webpush.sendNotification(
       {
@@ -135,74 +136,72 @@ async function processDelivery(
       JSON.stringify(payload),
       { TTL: 60 },
     );
-    const outcome = classifyProviderResponse(response.statusCode);
-    if (outcome === "success") {
-      await updateDelivery(admin, row.delivery_id, {
-        status: "sent",
-        sent_at: now,
-        last_error_code: null,
-      });
-      return "sent";
-    }
-    throw Object.assign(new Error("provider_response"), {
-      statusCode: response.statusCode,
-    });
+    status = response.statusCode;
   } catch (error) {
-    const status = providerStatus(error);
-    const outcome = classifyProviderResponse(status ?? 503);
-    const errorCode = stableErrorCode(status);
-    if (outcome === "endpoint_invalid") {
-      const { error: deleteError } = await admin
-        .from("push_subscriptions")
-        .delete()
-        .eq("id", row.push_subscription_id);
-      if (deleteError) {
-        // Never leave the delivery in `processing`: the scheduler re-claims
-        // stale processing rows every 5 minutes, so throwing here loops
-        // provider calls forever. Defer under the cap, then dead-letter.
-        const deleteErrorCode = "subscription_delete_failed";
-        if (row.attempts < MAX_ATTEMPTS) {
-          const nextAvailable = new Date(
-            Date.parse(now) + retryDelayMs(row.attempts),
-          ).toISOString();
-          await updateDelivery(admin, row.delivery_id, {
-            status: "pending",
-            available_at: nextAvailable,
-            last_error_code: deleteErrorCode,
-          });
-          return "retryable";
-        }
+    status = providerStatus(error);
+  }
+
+  const outcome = classifyProviderResponse(status ?? 503);
+  if (outcome === "success") {
+    await updateDelivery(admin, row.delivery_id, {
+      status: "sent",
+      sent_at: now,
+      last_error_code: null,
+    });
+    return "sent";
+  }
+
+  const errorCode = stableErrorCode(status);
+  if (outcome === "endpoint_invalid") {
+    const { error: deleteError } = await admin
+      .from("push_subscriptions")
+      .delete()
+      .eq("id", row.push_subscription_id);
+    if (deleteError) {
+      // Never leave the delivery in `processing`: the scheduler re-claims
+      // stale processing rows every 5 minutes, so throwing here loops
+      // provider calls forever. Defer under the cap, then dead-letter.
+      const deleteErrorCode = "subscription_delete_failed";
+      if (row.attempts < MAX_ATTEMPTS) {
+        const nextAvailable = new Date(
+          Date.parse(now) + retryDelayMs(row.attempts),
+        ).toISOString();
         await updateDelivery(admin, row.delivery_id, {
-          status: "dead_letter",
+          status: "pending",
+          available_at: nextAvailable,
           last_error_code: deleteErrorCode,
         });
-        return "dead_letter";
+        return "retryable";
       }
       await updateDelivery(admin, row.delivery_id, {
-        status: "endpoint_invalid",
-        last_error_code: errorCode,
+        status: "dead_letter",
+        last_error_code: deleteErrorCode,
       });
-      return "endpoint_invalid";
+      return "dead_letter";
     }
-
-    if (outcome === "retryable" && row.attempts < MAX_ATTEMPTS) {
-      const nextAvailable = new Date(
-        Date.parse(now) + retryDelayMs(row.attempts),
-      ).toISOString();
-      await updateDelivery(admin, row.delivery_id, {
-        status: "pending",
-        available_at: nextAvailable,
-        last_error_code: errorCode,
-      });
-      return "retryable";
-    }
-
     await updateDelivery(admin, row.delivery_id, {
-      status: "dead_letter",
+      status: "endpoint_invalid",
       last_error_code: errorCode,
     });
-    return "dead_letter";
+    return "endpoint_invalid";
   }
+
+  if (outcome === "retryable" && row.attempts < MAX_ATTEMPTS) {
+    const nextAvailable = new Date(Date.parse(now) + retryDelayMs(row.attempts))
+      .toISOString();
+    await updateDelivery(admin, row.delivery_id, {
+      status: "pending",
+      available_at: nextAvailable,
+      last_error_code: errorCode,
+    });
+    return "retryable";
+  }
+
+  await updateDelivery(admin, row.delivery_id, {
+    status: "dead_letter",
+    last_error_code: errorCode,
+  });
+  return "dead_letter";
 }
 
 Deno.serve(async (request) => {
