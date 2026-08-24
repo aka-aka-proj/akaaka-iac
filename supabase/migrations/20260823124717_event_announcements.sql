@@ -59,6 +59,30 @@ $$;
 REVOKE ALL ON FUNCTION public.is_event_announcement_registrant(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.is_event_announcement_registrant(UUID) TO authenticated;
 
+-- Bidirectional block checks must bypass the invoker-scoped blocks RLS
+-- (blocks_read_owner only exposes rows where the caller is the blocker),
+-- otherwise a user blocked by the host still passes NOT EXISTS checks.
+CREATE OR REPLACE FUNCTION public.blocks_pair_either_direction(
+  p_left UUID,
+  p_right UUID
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.blocks b
+    WHERE (b.blocker_id = p_left AND b.blocked_id = p_right)
+       OR (b.blocker_id = p_right AND b.blocked_id = p_left)
+  );
+$$;
+
+REVOKE ALL ON FUNCTION public.blocks_pair_either_direction(UUID, UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.blocks_pair_either_direction(UUID, UUID) TO authenticated;
+
 -- Registered members retain the same event access for native events even when
 -- the event is not public. Blocking or an unpublished/closed event removes it.
 DROP POLICY IF EXISTS events_read_visibility ON public.events;
@@ -68,14 +92,12 @@ USING (
   OR (
     lifecycle_status <> 'draft'
     AND publication_status = 'published'
-    AND NOT EXISTS (
-      SELECT 1
-      FROM public.blocks b
-      WHERE (b.blocker_id = auth.uid() AND b.blocked_id = events.creator_id)
-         OR (b.blocker_id = events.creator_id AND b.blocked_id = auth.uid())
-    )
+    AND NOT public.blocks_pair_either_direction(auth.uid(), events.creator_id)
     AND (
-      public.is_event_announcement_registrant(events.id)
+      (
+        events.external_registration_url IS NULL
+        AND public.is_event_announcement_registrant(events.id)
+      )
       OR (visibility_settings ->> 'type') IS NULL
       OR (visibility_settings ->> 'type') = 'public'
       OR (
@@ -110,14 +132,12 @@ CREATE POLICY event_announcements_select_access
             event_announcements.status = 'published'
             AND e.lifecycle_status <> 'draft'
             AND e.publication_status = 'published'
-            AND NOT EXISTS (
-              SELECT 1
-              FROM public.blocks b
-              WHERE (b.blocker_id = auth.uid() AND b.blocked_id = e.creator_id)
-                 OR (b.blocker_id = e.creator_id AND b.blocked_id = auth.uid())
-            )
+            AND NOT public.blocks_pair_either_direction(auth.uid(), e.creator_id)
             AND (
-              public.is_event_announcement_registrant(e.id)
+              (
+                e.external_registration_url IS NULL
+                AND public.is_event_announcement_registrant(e.id)
+              )
               OR
               COALESCE(e.visibility_settings ->> 'type', 'public') = 'public'
               OR (
@@ -212,6 +232,11 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
+    -- Depth > 1 means the delete was fired by another action (e.g. the
+    -- events FK ON DELETE CASCADE); only direct deletes are forbidden.
+    IF pg_trigger_depth() > 1 THEN
+      RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'event announcements cannot be deleted';
   END IF;
 
@@ -288,7 +313,7 @@ ALTER TABLE public.notifications
 
 CREATE UNIQUE INDEX IF NOT EXISTS notifications_event_announcement_target_unique
   ON public.notifications (recipient_profile_id, event_announcement_id)
-;
+  WHERE event_announcement_id IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION public.validate_event_announcement_input(
   p_event_id UUID,
@@ -342,6 +367,7 @@ AS $$
 DECLARE
   announcement public.event_announcements;
   recipient_count INTEGER := 0;
+  v_creator_id UUID;
 BEGIN
   SELECT a.* INTO announcement
   FROM public.event_announcements a
@@ -349,11 +375,18 @@ BEGIN
   WHERE a.id = p_announcement_id
     AND a.status IN ('draft', 'scheduled')
     AND e.external_registration_url IS NULL
+    AND e.lifecycle_status <> 'draft'
+    AND e.publication_status = 'published'
   FOR UPDATE OF a;
 
   IF announcement.id IS NULL THEN
     RAISE EXCEPTION 'announcement not found or cannot be published';
   END IF;
+
+  SELECT creator_id INTO v_creator_id
+  FROM public.events
+  WHERE id = announcement.event_id
+  FOR UPDATE;
 
   IF EXISTS (
     SELECT 1 FROM public.event_announcements a
@@ -373,7 +406,9 @@ BEGIN
   SELECT count(DISTINCT er.profile_id)::INTEGER INTO recipient_count
   FROM public.event_registrations er
   WHERE er.event_id = announcement.event_id
-    AND er.status IN ('approved', 'pending', 'waitlisted', 'cancelled');
+    AND er.status IN ('approved', 'pending', 'waitlisted', 'cancelled')
+    AND er.profile_id <> v_creator_id
+    AND NOT public.blocks_pair_either_direction(er.profile_id, v_creator_id);
 
   INSERT INTO public.notifications (
     recipient_profile_id, notification_type, event_announcement_id, title
@@ -382,8 +417,10 @@ BEGIN
   FROM public.event_registrations er
   WHERE er.event_id = announcement.event_id
     AND er.status IN ('approved', 'pending', 'waitlisted', 'cancelled')
-    AND er.profile_id <> (SELECT creator_id FROM public.events WHERE id = announcement.event_id)
-  ON CONFLICT (recipient_profile_id, event_announcement_id) DO NOTHING;
+    AND er.profile_id <> v_creator_id
+    AND NOT public.blocks_pair_either_direction(er.profile_id, v_creator_id)
+  ON CONFLICT (recipient_profile_id, event_announcement_id)
+    WHERE event_announcement_id IS NOT NULL DO NOTHING;
 
   RETURN recipient_count;
 END;
@@ -405,12 +442,29 @@ SET search_path = public, extensions
 AS $$
 DECLARE
   announcement public.event_announcements;
+  v_creator_id UUID;
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'authentication required'; END IF;
   IF p_publish_now AND p_publish_at IS NOT NULL THEN RAISE EXCEPTION 'choose publish now or schedule'; END IF;
   PERFORM public.validate_event_announcement_input(p_event_id, p_title, p_body_markdown, p_publish_at);
+
+  SELECT creator_id INTO v_creator_id
+  FROM public.events
+  WHERE id = p_event_id
+  FOR UPDATE;
+
+  -- The event row lock serializes concurrent creations/publishes so the
+  -- per-event limit and the 12-hour frequency check cannot race.
   IF (SELECT count(*) FROM public.event_announcements WHERE event_id = p_event_id) >= 5 THEN
     RAISE EXCEPTION 'event announcement limit exceeded';
+  END IF;
+  IF p_publish_now AND NOT EXISTS (
+    SELECT 1 FROM public.events e
+    WHERE e.id = p_event_id
+      AND e.lifecycle_status <> 'draft'
+      AND e.publication_status = 'published'
+  ) THEN
+    RAISE EXCEPTION 'event must be visible to attendees before announcing';
   END IF;
 
   PERFORM set_config('app.event_announcement_rpc', 'on', true);
@@ -438,8 +492,10 @@ BEGIN
     FROM public.event_registrations er
     WHERE er.event_id = p_event_id
       AND er.status IN ('approved', 'pending', 'waitlisted', 'cancelled')
-      AND er.profile_id <> (SELECT creator_id FROM public.events WHERE id = p_event_id)
-    ON CONFLICT (recipient_profile_id, event_announcement_id) DO NOTHING;
+      AND er.profile_id <> v_creator_id
+      AND NOT public.blocks_pair_either_direction(er.profile_id, v_creator_id)
+    ON CONFLICT (recipient_profile_id, event_announcement_id)
+      WHERE event_announcement_id IS NOT NULL DO NOTHING;
   END IF;
 
   RETURN announcement;
