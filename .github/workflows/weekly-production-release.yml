@@ -1,6 +1,6 @@
 name: Weekly Production Release
 
-# 每週五台灣時間 08:00（週五 00:00 UTC）自動將已驗證的 preview 變更依序發佈：
+# 每週五台灣時間 08:19（週五 00:19 UTC）自動將已驗證的 preview 變更依序發佈：
 # akaaka-iac -> akaaka-frontend -> akaaka-docs，並以 Resend 寄送狀態報告。
 #
 # 契約文件：akaaka-docs/docs/spec/platform/001-vercel-deployment-spec.md
@@ -18,8 +18,8 @@ name: Weekly Production Release
 
 on:
   schedule:
-    # Friday 00:00 UTC = Friday 08:00 Asia/Taipei (UTC+8, no DST)
-    - cron: '0 0 * * 5'
+    # Friday 00:19 UTC = Friday 08:19 Asia/Taipei (UTC+8, no DST); off top-of-hour to avoid scheduler high-load drops
+    - cron: '19 0 * * 5'
   workflow_dispatch:
 
 permissions:
