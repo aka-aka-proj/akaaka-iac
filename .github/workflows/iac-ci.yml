@@ -129,25 +129,41 @@ jobs:
       - name: Check push subscription hygiene boundary
         if: matrix.target.name == 'migrations'
         run: |
-          hygiene="supabase/migrations/20260825000000_push_subscription_hygiene.sql"
+          expand="supabase/migrations/20260825000000_push_subscription_hygiene.sql"
+          contract="supabase/migrations/20260826000000_push_subscription_endpoint_unique_contract_step.sql"
 
           for required in \
-            "push_subscriptions_endpoint_unique UNIQUE (endpoint)" \
+            "notification_push_deliveries_status_check" \
+            "'cancelled'" \
+            "REVOKE INSERT, UPDATE ON public.push_subscriptions FROM authenticated" \
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON public.push_subscriptions TO service_role" \
+            "GRANT SELECT ON public.notifications TO service_role" \
+            "endpoint_conflict" \
+            "'endpoint_moved'" \
+            "'subscription_missing'" \
+            "idx_notification_push_deliveries_subscription_sent" \
+            "status IN ('pending', 'processing')" \
             "SECURITY DEFINER" \
             "SET search_path = public, extensions" \
-            "REVOKE ALL ON FUNCTION public.subscribe_push_subscription(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC" \
             "GRANT EXECUTE ON FUNCTION public.subscribe_push_subscription(TEXT, TEXT, TEXT, TEXT) TO authenticated" \
-            "REVOKE ALL ON FUNCTION public.cleanup_stale_push_subscriptions(INTEGER) FROM PUBLIC" \
             "GRANT EXECUTE ON FUNCTION public.cleanup_stale_push_subscriptions(INTEGER) TO service_role"; do
-            if ! grep -Fq "$required" "$hygiene"; then
-              echo "Missing push subscription hygiene contract: $required"
+            if ! grep -Fq "$required" "$expand"; then
+              echo "Missing expand hygiene contract: $required"
+              exit 1
+            fi
+          done
+
+          for required in \
+            "push_subscriptions_endpoint_unique UNIQUE (endpoint)" ; do
+            if ! grep -Fq "$required" "$contract"; then
+              echo "Missing contract-step hygiene boundary: $required"
               exit 1
             fi
           done
 
           for forbidden in pg_net http; do
-            if grep -Fq "$forbidden" "$hygiene"; then
-              echo "Forbidden external-network pattern in hygiene migration: $forbidden"
+            if grep -Fq "$forbidden" "$expand" "$contract"; then
+              echo "Forbidden external-network pattern in hygiene migrations: $forbidden"
               exit 1
             fi
           done
