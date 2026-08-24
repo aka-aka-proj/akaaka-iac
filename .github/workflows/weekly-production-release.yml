@@ -107,8 +107,9 @@ jobs:
             done
             return 1
           }
+          # checkpoint 存於 orchestrator repo（GITHUB_REPOSITORY）；用各 stage 的 REPO 讀會在 frontend 找錯 repo，resume 靜默失效
           state_get() {
-            gh api "repos/$REPO/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
           }
 
           ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
@@ -166,7 +167,8 @@ jobs:
             # Release manifest：merge 前驗證 PR head 仍等於 run 起點快照
             cur_head="$(gh api "repos/$REPO/branches/preview" --jq '.commit.sha')" || { detail="failed to read current preview head"; exit 0; }
             if [ "$cur_head" != "$PINNED_SHA" ]; then
-              result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 0
+              # abort 必須讓 job 失敗，GitHub Actions 才會 skip 下游 stage，維持 IaC -> Frontend 發版順序
+              result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
             fi
 
             # iac-cd.yml 只在特定路徑變更時觸發；必須在 merge 前比對 diff（merge 後 main...preview 為空）
@@ -184,7 +186,10 @@ jobs:
           fi
 
           if [ "$resume_watch" -eq 1 ]; then
-            commit_files="$(gh api "repos/$REPO/commits/$sha" --jq '.files[].filename' 2>/dev/null)" || commit_files=""
+            # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過
+            if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --jq '.files[].filename')"; then
+              deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 0
+            fi
             will_deploy=0
             if printf '%s' "$commit_files" | touches_cd_paths; then will_deploy=1; fi
             if [ "$will_deploy" -eq 0 ]; then
@@ -249,8 +254,9 @@ jobs:
           }
           trap cleanup EXIT
 
+          # checkpoint 存於 orchestrator repo（GITHUB_REPOSITORY）；用各 stage 的 REPO 讀會在 frontend 找錯 repo，resume 靜默失效
           state_get() {
-            gh api "repos/$REPO/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
           }
 
           ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
@@ -306,7 +312,8 @@ jobs:
             # Release manifest：merge 前驗證 PR head 仍等於 run 起點快照
             cur_head="$(gh api "repos/$REPO/branches/preview" --jq '.commit.sha')" || { detail="failed to read current preview head"; exit 0; }
             if [ "$cur_head" != "$PINNED_SHA" ]; then
-              result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 0
+              # abort 必須讓 job 失敗，GitHub Actions 才會 skip 下游 stage，維持 IaC -> Frontend 發版順序
+              result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
             fi
 
             sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || { detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0; }
@@ -530,7 +537,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Persist release state checkpoint
-        if: always()
+        # dry-run 為唯讀規劃，不得建立或覆寫 checkpoint（否則會清掉待 resume 的失敗部署紀錄）
+        if: ${{ always() && env.RELEASE_MODE != 'dry-run' }}
         run: |
           set -uo pipefail
           REPO="${GITHUB_REPOSITORY}"
