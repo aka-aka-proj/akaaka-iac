@@ -1,4 +1,5 @@
-import { generateRecurringDates, validateRecurrenceRule } from './recurrence.ts'
+import { generateRecurringDates, validateRecurrenceRule, RecurrenceSeriesTooLongError } from './recurrence.ts'
+import type { RecurrenceRule, UnvalidatedRecurrenceRule } from './recurrence.ts'
 
 function assertEquals<T>(actual: T, expected: T): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -170,4 +171,53 @@ Deno.test('V10 monthly weekday sorts same-month candidates chronologically', () 
     '2026-02-28T08:00:00.000Z',
     '2026-03-28T08:00:00.000Z',
   ])
+})
+
+Deno.test('V11 count = 1 generates no follow-up copies', () => {
+  const weekly = generateRecurringDates(v1BaseSunday, { frequency: 'weekly', interval: 2, days: ['Mon'], count: 1 })
+  const monthly = generateRecurringDates(new Date('2026-01-31T09:00:00.000Z'), { frequency: 'monthly', interval: 1, count: 1 })
+  assertEquals(weekly.map((date) => date.toISOString()), [])
+  assertEquals(monthly.map((date) => date.toISOString()), [])
+})
+
+function ruleWithUntil(until: unknown): UnvalidatedRecurrenceRule {
+  return { frequency: 'weekly', interval: 1, until } as unknown as UnvalidatedRecurrenceRule
+}
+
+Deno.test('V12 validation rejects non-string or empty until values', () => {
+  for (const until of [0, false, '', 123]) {
+    assertEquals(validateRecurrenceRule(ruleWithUntil(until)), 'until must be a valid timestamp')
+  }
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 4, until: '2026-04-15T00:00:00.000Z' }),
+    'provide either count or until, not both',
+  )
+})
+
+Deno.test('V12b generation applies a non-string until as a real cutoff instead of ignoring it', () => {
+  const dates = generateRecurringDates(v1BaseSunday, { frequency: 'weekly', interval: 1, until: 0 } as unknown as RecurrenceRule)
+  assertEquals(dates.map((date) => date.toISOString()), [])
+})
+
+Deno.test('V13 until series exceeding 52 total events is rejected, not truncated', () => {
+  let thrown: unknown
+  try {
+    generateRecurringDates(new Date('2026-08-10T12:00:00.000Z'), {
+      frequency: 'weekly',
+      interval: 1,
+      until: '2030-01-01T12:00:00.000Z',
+    })
+  } catch (err) {
+    thrown = err
+  }
+  assertEquals(thrown instanceof RecurrenceSeriesTooLongError, true)
+})
+
+Deno.test('V14 until series of exactly 52 total events succeeds', () => {
+  const dates = generateRecurringDates(new Date('2026-08-10T12:00:00.000Z'), {
+    frequency: 'weekly',
+    interval: 1,
+    until: '2027-08-02T12:00:00.000Z',
+  })
+  assertEquals(dates.length, 51)
 })

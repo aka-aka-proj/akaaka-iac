@@ -24,7 +24,19 @@ const DAY_MAP: Record<string, number> = {
 
 const DAY_NAMES = Object.keys(DAY_MAP)
 
-// Hard guards so generators always terminate even when callers bypass validation.
+export const MAX_SERIES_TOTAL = 52
+
+// Callers must catch this and respond with 400 validation_error; an over-cap
+// `until` series is rejected, never silently truncated (spec「前置條件」).
+export class RecurrenceSeriesTooLongError extends Error {
+  constructor() {
+    super('recurrence series exceeds the maximum of 52 total events')
+    this.name = 'RecurrenceSeriesTooLongError'
+  }
+}
+
+// Hard guards so generators always terminate even when callers bypass validation;
+// validated input always terminates earlier via the count/until/series-cap checks.
 const MAX_WEEK_STEPS = 5200
 const MAX_MONTH_STEPS = 1200
 
@@ -66,7 +78,7 @@ export function validateRecurrenceRule(rule: UnvalidatedRecurrenceRule): string 
       return 'days must contain unique values from Sun through Sat'
     }
   }
-  if (rule.until !== undefined && rule.until !== null && Number.isNaN(new Date(rule.until).getTime())) {
+  if (rule.until !== undefined && rule.until !== null && (typeof rule.until !== 'string' || Number.isNaN(new Date(rule.until).getTime()))) {
     return 'until must be a valid timestamp'
   }
   if ((rule.count !== undefined) === (rule.until !== undefined && rule.until !== null)) {
@@ -146,22 +158,29 @@ function* monthlyCandidates(base: Date, rule: RecurrenceRule): Generator<Date> {
  * docs/spec/features/events/007-recurring-events-spec.md「日期演算法」).
  * Candidates are enumerated in chronological order, filtered to strictly-after-base,
  * cut by `until` (inclusive) or truncated to `count - 1`, deduplicated, ascending.
+ * Throws RecurrenceSeriesTooLongError when an `until` rule would exceed MAX_SERIES_TOTAL.
  */
 export function generateRecurringDates(base: Date, rule: RecurrenceRule): Date[] {
-  const limit = rule.count !== undefined ? rule.count - 1 : Number.POSITIVE_INFINITY
-  const until = rule.until ? new Date(rule.until) : null
+  // count includes the original event; the until path shares the same series cap.
+  const limit = Math.min(rule.count ?? MAX_SERIES_TOTAL, MAX_SERIES_TOTAL) - 1
+  if (limit <= 0) return []
+  // Not a truthiness check — falsy values like 0 must not disable the cutoff.
+  const until = rule.until != null ? new Date(rule.until) : null
   const seen = new Set<string>()
   const dates: Date[] = []
 
   const candidates = rule.frequency === 'weekly' ? weeklyCandidates(base, rule) : monthlyCandidates(base, rule)
   for (const candidate of candidates) {
     if (candidate <= base) continue
-    if (until && candidate > until) break
+    if (until !== null && candidate > until) break
     const key = candidate.toISOString()
     if (seen.has(key)) continue
     seen.add(key)
+    if (dates.length >= limit) {
+      if (rule.count !== undefined) break
+      throw new RecurrenceSeriesTooLongError()
+    }
     dates.push(candidate)
-    if (dates.length >= limit) break
   }
   return dates
 }

@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { generateRecurringDates, validateRecurrenceRule } from '../_shared/recurrence.ts'
+import { generateRecurringDates, validateRecurrenceRule, RecurrenceSeriesTooLongError } from '../_shared/recurrence.ts'
 import type { RecurrenceRule } from '../_shared/recurrence.ts'
 
 const corsHeaders = {
@@ -52,7 +52,7 @@ Deno.serve(async (req: Request) => {
     }
     const validationError = validateRecurrenceRule(rule)
     if (validationError) return errorResponse('validation_error', validationError, 400)
-    if (rule.until && new Date(rule.until) < baseDate) {
+    if (rule.until != null && new Date(rule.until) < baseDate) {
       return errorResponse('validation_error', 'until must not be earlier than start_time', 400)
     }
 
@@ -61,7 +61,15 @@ Deno.serve(async (req: Request) => {
     if (parentError || !parentEvent) return errorResponse('not_found', 'Parent event not found', 404)
     if (parentEvent.creator_id !== user.id) return errorResponse('forbidden', 'Only the event host can create recurring events', 403)
 
-    const dates = generateRecurringDates(baseDate, rule)
+    let dates: Date[]
+    try {
+      dates = generateRecurringDates(baseDate, rule)
+    } catch (err) {
+      if (err instanceof RecurrenceSeriesTooLongError) {
+        return errorResponse('validation_error', err.message, 400)
+      }
+      throw err
+    }
     const instanceIds = [parentEventId]
     let failedInstanceCount = 0
 
