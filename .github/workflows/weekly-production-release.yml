@@ -163,6 +163,7 @@ jobs:
               | last // empty')"
             appr_state="$(printf '%s' "$latest" | jq -r '.state // ""')"
             appr_commit="$(printf '%s' "$latest" | jq -r '.commit_id // ""')"
+            appr_login="$(printf '%s' "$latest" | jq -r '.user.login // ""')"
             if [ "$appr_state" != "APPROVED" ]; then
               detail+="PR #$n skipped (awaiting human approval); "
               continue
@@ -171,6 +172,16 @@ jobs:
               detail+="PR #$n skipped (approval bound to older commit, not snapshot head); "
               continue
             fi
+            # 核准者即時權限查驗：author association 不保證目前具 write 權限
+            # （已降權成員仍可保留 MEMBER 標記）；僅 write/admin 算數，查詢失敗 fail-closed
+            perm="$(gh api "repos/$REPO/collaborators/$appr_login/permission" --jq '.permission' 2>/dev/null || echo "query-failed")"
+            case "$perm" in
+              write|admin) : ;;
+              *)
+                detail+="PR #$n skipped (approver $appr_login lacks current write permission: $perm); "
+                continue
+                ;;
+            esac
 
             # 等 checks 全數完成且成功；有失敗立即跳過該 PR（stage 共享 deadline）
             ok=1
@@ -517,7 +528,9 @@ jobs:
           if [ "$resume_watch" -eq 1 ]; then
             # API 失敗不得視為「無 CD 觸發路徑」：保留失敗狀態，下次 run 再重新驗證
             if [ "$resume_mode" != "terminal-follow" ]; then
-              if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --jq '.files[].filename')"; then
+              # Get a commit 單頁上限 30 檔；CD 觸發路徑落在後續頁時會誤判 no-deploy，
+              # 故必須 --paginate（#79 同源修復）
+              if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --paginate --jq '.files[].filename' 2>/dev/null)"; then
                 deploy="failed"; class="post-merge-failed"
                 detail="resume: commit files API failed for $sha; keeping unresolved state for next-run retry"; exit 0
               fi
