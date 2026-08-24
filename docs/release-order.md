@@ -34,16 +34,21 @@ Main CD 使用既有 hosted migration history 逐一比對；`supabase/migration
 #### Web Push delivery 部署順序
 
 `deliver-web-push` 是由 GitHub Actions scheduler 呼叫的受控 Edge Function。部署
-Web Push slice 時，必須依下列順序完成，否則 function 會回傳
-`delivery_not_configured`，scheduler 也會因非 200 response 失敗：
+Web Push slice 時，必須依下列順序完成：缺少 VAPID／Supabase 執行期設定時，
+function 會回傳 HTTP 500 `delivery_not_configured`；缺少或不符的
+`PUSH_DELIVERY_TOKEN` 則會在授權檢查階段直接回傳 HTTP 401 `unauthorized`，
+不會進到 VAPID 設定檢查。任一非 200 response 都會使 scheduler run 失敗：
 
 1. 在目標 Supabase project 的 Edge Function secrets 設定四個必要值：
    `VAPID_SUBJECT`、`VAPID_PUBLIC_KEY`、`VAPID_PRIVATE_KEY`、
    `PUSH_DELIVERY_TOKEN`。
 2. 完成 schema／function 的 IaC CD，確認 `deliver-web-push` 已部署至同一個
    project ref。
-3. 設定對應 GitHub Actions environment 的 scheduler secrets，確認
-   `SUPABASE_PROJECT_REF` 與 `PUSH_DELIVERY_TOKEN` 指向同一個 production
+3. 設定 repository 層級的 GitHub Actions scheduler secrets（`Settings ->
+   Secrets and variables -> Actions`）。`.github/workflows/web-push-delivery-scheduler.yml`
+   的 `deliver` job 未綁定任何 GitHub Actions environment，environment secrets
+   無法被排程與手動 smoke 讀取，因此四項值不得設定為 environment secrets。
+   確認 `SUPABASE_PROJECT_REF` 與 `PUSH_DELIVERY_TOKEN` 指向同一個 production
    project；preview smoke 則使用 `SUPABASE_PROJECT_REF_PREVIEW` 與
    `PUSH_DELIVERY_TOKEN_PREVIEW`。
 4. 在 `preview` 以 `workflow_dispatch` 執行 staging smoke；確認 HTTP 200 且
@@ -53,9 +58,10 @@ Web Push slice 時，必須依下列順序完成，否則 function 會回傳
    依 Web Push runbook 留存正常 scheduler run 的 runtime evidence。
 
 VAPID 三項 secrets 只供 Edge Function runtime 使用；scheduler 不得取得或注入
-VAPID key。`PUSH_DELIVERY_TOKEN` 必須在 Edge Function 與對應 scheduler
-environment 使用相同值，但 production 與 preview 必須分開。所有 secret value
-不得提交 repository、issue、workflow log、summary 或 response。
+VAPID key。`PUSH_DELIVERY_TOKEN` 必須在 Edge Function 與 workflow 依 branch
+選擇的 scheduler secret（production 或 preview 配對）使用相同值，但 production
+與 preview 必須分開。所有 secret value 不得提交 repository、issue、workflow
+log、summary 或 response。
 
 ---
 
