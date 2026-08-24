@@ -181,6 +181,15 @@ jobs:
             result="released"
 
             if [ "$will_deploy" -eq 0 ]; then
+              # 新 merge 未觸發 CD 不代表前次失敗已解決：保留 prevsha+failed，供下次 run 繼續驗證而非永久跳過
+              prev="$(state_get iac)"
+              psha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
+              pdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
+              if [ -n "$psha" ] && [ "$pdep" != "success" ] && [ "$pdep" != "no-deploy" ]; then
+                new_sha="$sha"; sha="$psha"; deploy="failed"
+                detail="merged PR #$pr ($new_sha) with no CD trigger paths; previous deployment of $psha still $pdep, keeping failed state"
+                exit 0
+              fi
               deploy="no-deploy"; detail="merged PR #$pr ($sha); no iac-cd.yml trigger paths changed"; exit 0
             fi
           fi
@@ -400,13 +409,13 @@ jobs:
 
           # 新契約：docs 無 preview 分支；orchestrator 合併「已人工核准的 task -> main PR」
           if [ "$RELEASE_MODE" = "dry-run" ]; then
-            open_prs="$(gh pr list -R "$REPO" --base main --state open --json number --jq '[.[].number] | join(",")')"
+            open_prs="$(gh pr list -R "$REPO" --base main --state open --limit 200 --json number --jq '[.[].number] | join(",")')"
             result="dry-run"
             detail="dry-run: open docs release PRs=[${open_prs:-none}]; no mutations performed"
             exit 0
           fi
 
-          mapfile -t rows < <(gh pr list -R "$REPO" --base main --state open --json number,headRefOid --jq '.[] | [.number, .headRefOid] | @tsv')
+          mapfile -t rows < <(gh pr list -R "$REPO" --base main --state open --limit 200 --json number,headRefOid --jq '.[] | [.number, .headRefOid] | @tsv')
           if [ "${#rows[@]}" -eq 0 ]; then
             result="no-changes"; detail="no open task->main PRs on akaaka-docs"; exit 0
           fi
@@ -416,7 +425,8 @@ jobs:
           for row in "${rows[@]}"; do
             n="${row%%$'\t'*}"; expect="${row##*$'\t'}"
 
-            approvals="$(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED")] | length')"
+            # 僅計人類核准（排除 Bot/App reviewer），落實「人工 APPROVED 才可合併」契約
+            approvals="$(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not))] | length')"
             if [ "${approvals:-0}" -eq 0 ]; then
               detail+="PR #$n skipped (awaiting human approval); "
               continue
@@ -543,12 +553,22 @@ jobs:
           set -uo pipefail
           REPO="${GITHUB_REPOSITORY}"
           BRANCH="$RELEASE_STATE_BRANCH"
+          prev_json="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
 
           state="$(jq -n \
             --arg ir "${{ needs.release-iac.outputs.result }}" --arg isha "${{ needs.release-iac.outputs.sha }}" --arg idep "${{ needs.release-iac.outputs.deploy }}" \
             --arg fr "${{ needs.release-frontend.outputs.result }}" --arg fsha "${{ needs.release-frontend.outputs.sha }}" --arg fdep "${{ needs.release-frontend.outputs.deploy }}" \
             --arg dr "${{ needs.release-docs.outputs.result }}" --arg dsha "${{ needs.release-docs.outputs.sha }}" --arg ddep "${{ needs.release-docs.outputs.deploy }}" \
             '{iac:{result:$ir,sha:$isha,deploy:$idep}, frontend:{result:$fr,sha:$fsha,deploy:$fdep}, docs:{result:$dr,sha:$dsha,deploy:$ddep}}')"
+
+          # skipped/abort 的 stage 本次無新事實：保留既有 checkpoint，以免清掉待 resume 的失敗紀錄
+          if printf '%s' "$prev_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            state="$(printf '%s' "$state" | jq -c --argjson prev "$prev_json" '
+              .iac = (if ((.iac.result // "") == "" or .iac.result == "aborted") then ($prev.iac // .iac) else .iac end) |
+              .frontend = (if ((.frontend.result // "") == "" or .frontend.result == "aborted") then ($prev.frontend // .frontend) else .frontend end) |
+              .docs = (if ((.docs.result // "") == "" or .docs.result == "aborted") then ($prev.docs // .docs) else .docs end)
+            ')"
+          fi
 
           if ! gh api "repos/$REPO/branches/$BRANCH" >/dev/null 2>&1; then
             main_sha="$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')"
