@@ -35,6 +35,7 @@ type DeliverySummary = {
   sent: number;
   retryable: number;
   endpoint_invalid: number;
+  cancelled: number;
   dead_letter: number;
   skipped: number;
 };
@@ -260,15 +261,73 @@ Deno.serve(async (request) => {
   );
   if (error) return json({ error: "delivery_claim_failed" }, 503);
 
+  const deliveryRows = (rows ?? []) as DeliveryRow[];
+
+  // Pre-send ownership validation: between enqueue and send a subscription
+  // can disappear (scheduled cleanup, fan-out revocation) or move to another
+  // profile via subscribe_push_subscription. Delivering either way would leak
+  // the previous profile's notification to a device now controlled by
+  // someone else, so fence those jobs to the terminal `cancelled` state.
+  const subscriptionOwners = new Map<string, string>();
+  const notificationRecipients = new Map<string, string>();
+  if (deliveryRows.length > 0) {
+    const [subscriptionsResult, notificationsResult] = await Promise.all([
+      admin
+        .from("push_subscriptions")
+        .select("id, profile_id")
+        .in(
+          "id",
+          [...new Set(deliveryRows.map((row) => row.push_subscription_id))],
+        ),
+      admin
+        .from("notifications")
+        .select("id, recipient_profile_id")
+        .in(
+          "id",
+          [...new Set(deliveryRows.map((row) => row.notification_id))],
+        ),
+    ]);
+    if (subscriptionsResult.error || notificationsResult.error) {
+      return json({ error: "subscription_validation_failed" }, 503);
+    }
+    for (const subscription of subscriptionsResult.data ?? []) {
+      subscriptionOwners.set(
+        subscription.id as string,
+        subscription.profile_id as string,
+      );
+    }
+    for (const notification of notificationsResult.data ?? []) {
+      notificationRecipients.set(
+        notification.id as string,
+        notification.recipient_profile_id as string,
+      );
+    }
+  }
+
   const summary: DeliverySummary = {
-    claimed: rows?.length ?? 0,
+    claimed: deliveryRows.length,
     sent: 0,
     retryable: 0,
     endpoint_invalid: 0,
+    cancelled: 0,
     dead_letter: 0,
     skipped: 0,
   };
-  for (const row of (rows ?? []) as DeliveryRow[]) {
+  for (const row of deliveryRows) {
+    const owner = subscriptionOwners.get(row.push_subscription_id);
+    const recipient = notificationRecipients.get(row.notification_id);
+    if (owner === undefined || recipient === undefined || owner !== recipient) {
+      try {
+        await updateDelivery(admin, row.delivery_id, {
+          status: "cancelled",
+          last_error_code: "subscription_unavailable",
+        });
+        summary.cancelled += 1;
+      } catch {
+        summary.skipped += 1;
+      }
+      continue;
+    }
     try {
       const outcome = await processDelivery(admin, row, now);
       summary[outcome] += 1;

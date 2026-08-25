@@ -30,6 +30,9 @@ inspector_port = 8083
 [functions.deliver-web-push]
 verify_jwt = false
 
+[functions.cleanup-push-subscriptions]
+verify_jwt = false
+
 [analytics]
 enabled = false
 
