@@ -137,6 +137,20 @@ jobs:
           }
           trap cleanup EXIT
 
+          # CAS merge 調和（#80 同源）：PUT 被 GitHub 接受但回應遺失（網路/API 錯誤）
+          # 不等於合併被拒——重新查詢 PR 狀態；MERGED 即取回 mergeCommit 照常進入監控，
+          # 否則（OPEN＝head moved 被 CAS 拒絕、或查詢失敗）維持 rejected 行為
+          cas_merge() { # repo pr expect_sha -> merge sha；失敗回傳非零
+            local r="$1" n="$2" s="$3" out st st_state msha
+            if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
+              printf '%s' "$out"; return 0
+            fi
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
+            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            return 1
+          }
+
           if [ "$RELEASE_MODE" = "dry-run" ]; then
             open_prs="$(gh pr list -R "$REPO" --base main --state open --limit 200 --json number --jq '[.[].number] | join(",")' 2>/dev/null || true)"
             result="dry-run"; class=""
@@ -219,7 +233,7 @@ jobs:
 
             # CAS merge：以快照 head 作為 expected-head precondition，由 GitHub 原子拒絕；
             # merge 被拒即中止該階段（不得繼續處理排隊 PR）
-            merged="$(gh api -X PUT "repos/$REPO/pulls/$n/merge" -f merge_method=merge -f sha="$expect_head" --jq '.sha')" || {
+            merged="$(cas_merge "$REPO" "$n" "$expect_head")" || {
               result="aborted"
               detail+="PR #$n merge rejected (CAS precondition failed); stage aborted"; exit 1; }
 
@@ -295,6 +309,20 @@ jobs:
             printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
           }
           trap cleanup EXIT
+          # CAS merge 調和（#80 同源）：PUT 被 GitHub 接受但回應遺失（網路/API 錯誤）
+          # 不等於合併被拒——重新查詢 PR 狀態；MERGED 即取回 mergeCommit 照常進入監控，
+          # 否則（OPEN＝head moved 被 CAS 拒絕、或查詢失敗）維持 rejected 行為
+          cas_merge() { # repo pr expect_sha -> merge sha；失敗回傳非零
+            local r="$1" n="$2" s="$3" out st st_state msha
+            if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
+              printf '%s' "$out"; return 0
+            fi
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
+            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            return 1
+          }
+
 
           touches_cd_paths() {
             local f
@@ -497,7 +525,7 @@ jobs:
             if printf '%s' "$cd_files" | touches_cd_paths; then will_deploy=1; fi
 
             # CAS merge：以 expected-head sha 原子拒絕 head 已變動的合併
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || { detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0; }
+            sha="$(cas_merge "$REPO" "$pr" "$cur_head")" || { detail="merge of PR #$pr rejected (head moved, state changed, or response lost without recorded merge)"; exit 0; }
             result="released"
 
             # Merge 後驗證 merge commit 落在預期整合分支上
@@ -652,6 +680,20 @@ jobs:
             printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
           }
           trap cleanup EXIT
+          # CAS merge 調和（#80 同源）：PUT 被 GitHub 接受但回應遺失（網路/API 錯誤）
+          # 不等於合併被拒——重新查詢 PR 狀態；MERGED 即取回 mergeCommit 照常進入監控，
+          # 否則（OPEN＝head moved 被 CAS 拒絕、或查詢失敗）維持 rejected 行為
+          cas_merge() { # repo pr expect_sha -> merge sha；失敗回傳非零
+            local r="$1" n="$2" s="$3" out st st_state msha
+            if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
+              printf '%s' "$out"; return 0
+            fi
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
+            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            return 1
+          }
+
 
           state_get() {
             gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
@@ -799,7 +841,7 @@ jobs:
             fi
 
             # CAS merge：以 expected-head sha 原子拒絕 head 已變動的合併
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || { detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0; }
+            sha="$(cas_merge "$REPO" "$pr" "$cur_head")" || { detail="merge of PR #$pr rejected (head moved, state changed, or response lost without recorded merge)"; exit 0; }
             result="released"
 
             # Merge 後驗證 merge commit 落在預期整合分支上
