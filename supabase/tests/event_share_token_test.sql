@@ -1,10 +1,10 @@
 BEGIN;
 
--- Share token contract tests（ADR-022）
--- 結構性驗證：definer/search_path/grants/條件檢查/欄位權限/index/trigger。
+-- Share token contract tests（ADR-022，獨立表設計）
+-- 結構性驗證：definer/search_path/grants/條件檢查/token 表存取封鎖/trigger。
 -- 行為測試（token 有效與否）依賴 auth session context，由 staging synthetic fixture 驗證。
 
-SELECT plan(20);
+SELECT plan(25);
 
 -- ============================================================
 -- SECURITY DEFINER + fixed search_path
@@ -79,8 +79,27 @@ SELECT ok(
 );
 
 -- ============================================================
--- Resolver must recheck publication / lifecycle / visibility / blocks
+-- Management RPCs must require private visibility（審查 P1 修復）
 -- ============================================================
+SELECT ok(
+  position('= ''private''' in pg_get_functiondef('public.ensure_event_share_token(uuid)'::regprocedure)) > 0,
+  'ensure refuses to mint tokens for non-private events'
+);
+
+SELECT ok(
+  position('= ''private''' in pg_get_functiondef('public.rotate_event_share_token(uuid)'::regprocedure)) > 0,
+  'rotate refuses non-private events too'
+);
+
+-- ============================================================
+-- Resolver: joins the token table and rechecks all event gates
+-- ============================================================
+SELECT ok(
+  pg_get_functiondef('public.get_event_by_share_token(text)'::regprocedure)
+    LIKE '%event_share_tokens%',
+  'resolver reads tokens from the dedicated table only'
+);
+
 SELECT ok(
   pg_get_functiondef('public.get_event_by_share_token(text)'::regprocedure)
     LIKE '%publication_status = ''published''%',
@@ -106,41 +125,55 @@ SELECT ok(
 );
 
 -- ============================================================
--- Column hardening: no direct UPDATE of events.share_token
--- （SELECT 維持開放，避免破壞既有 SELECT * 讀取路徑；可見者讀取
--- token 不會獲得超出其 RLS 的任何權限。）
+-- Token table is invisible to every direct access path（審查 P1/P2 修復）
 -- ============================================================
 SELECT ok(
-  NOT has_column_privilege('anon', 'events', 'share_token', 'UPDATE'),
-  'anon cannot update events.share_token directly'
+  (SELECT relrowsecurity FROM pg_class
+   WHERE oid = 'public.event_share_tokens'::regclass),
+  'event_share_tokens has RLS enabled'
 );
 
 SELECT ok(
-  NOT has_column_privilege('authenticated', 'events', 'share_token', 'UPDATE'),
-  'authenticated users cannot update events.share_token directly'
-);
-
--- ============================================================
--- Index + visibility-change hygiene trigger
--- ============================================================
-SELECT ok(
-  EXISTS (
-    SELECT 1 FROM pg_indexes
-    WHERE schemaname = 'public'
-      AND tablename = 'events'
-      AND indexname = 'idx_events_share_token'
+  NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'event_share_tokens'
   ),
-  'partial unique index backs share tokens'
+  'no RLS policy grants direct access to event_share_tokens'
 );
 
+SELECT ok(
+  NOT has_table_privilege('anon', 'event_share_tokens', 'SELECT')
+    AND NOT has_table_privilege('anon', 'event_share_tokens', 'INSERT')
+    AND NOT has_table_privilege('anon', 'event_share_tokens', 'UPDATE')
+    AND NOT has_table_privilege('anon', 'event_share_tokens', 'DELETE'),
+  'anon has zero table privileges on event_share_tokens'
+);
+
+SELECT ok(
+  NOT has_table_privilege('authenticated', 'event_share_tokens', 'SELECT')
+    AND NOT has_table_privilege('authenticated', 'event_share_tokens', 'INSERT')
+    AND NOT has_table_privilege('authenticated', 'event_share_tokens', 'UPDATE')
+    AND NOT has_table_privilege('authenticated', 'event_share_tokens', 'DELETE'),
+  'authenticated has zero table privileges on event_share_tokens'
+);
+
+-- ============================================================
+-- Hygiene trigger removes tokens when leaving private visibility
+-- ============================================================
 SELECT ok(
   EXISTS (
     SELECT 1 FROM information_schema.triggers
     WHERE event_object_schema = 'public'
       AND event_object_table = 'events'
-      AND trigger_name = 'trg_clear_share_token_off_private'
+      AND trigger_name = 'trg_delete_share_token_off_private'
   ),
-  'leaving private visibility clears the share token'
+  'leaving private visibility deletes the token row'
+);
+
+SELECT ok(
+  (SELECT p.prosecdef FROM pg_proc p
+   WHERE p.oid = 'public.delete_share_token_off_private()'::regprocedure),
+  'hygiene trigger function is security definer'
 );
 
 SELECT * FROM finish();
