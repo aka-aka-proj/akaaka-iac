@@ -1,9 +1,9 @@
 name: Weekly Production Release
 
-# 每週五台灣時間 08:19（週五 00:19 UTC）自動將已驗證的 preview 變更依序發佈：
-# akaaka-iac -> akaaka-frontend -> akaaka-docs，並以 Resend 寄送狀態報告。
+# 每週五台灣時間 08:19（週五 00:19 UTC）自動將已驗證的變更依序發佈：
+# akaaka-docs -> akaaka-iac -> akaaka-frontend（權威文件先行進 main），並以 Resend 寄送狀態報告。
 #
-# 契約文件：akaaka-docs/docs/spec/platform/001-vercel-deployment-spec.md
+# 契約文件：akaaka-docs/docs/spec/platform/001-vercel-deployment-spec.md「Weekly scheduled production release」
 # 決策記錄：akaaka-docs/docs/adr/020-weekly-scheduled-production-release.md
 #
 # 必要 secrets（akaaka-iac repo）：
@@ -44,33 +44,71 @@ env:
   REPORT_FROM: ${{ vars.RELEASE_REPORT_FROM || 'onboarding@resend.dev' }}
   RELEASE_MODE: ${{ inputs.mode || 'release' }}
   RELEASE_STATE_BRANCH: weekly-release-state
+  DOCS_REPO: aka-aka-proj/akaaka-docs
 
 jobs:
+  # ------------------------------------------------------------------
+  # Release manifest：run 起點快照所有候選 merge target。
+  # per PR 記錄 repository、PR number、head SHA、base ref 與 base SHA；
+  # head-only precondition 抓不到 base 外部變動，故兩者皆須綁定。
+  # ------------------------------------------------------------------
   manifest:
-    name: Snapshot preview heads
+    name: Snapshot release manifest
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       iac: ${{ steps.snap.outputs.iac }}
       frontend: ${{ steps.snap.outputs.frontend }}
+      docs: ${{ steps.snap.outputs.docs }}
     steps:
-      - name: Record release manifest SHAs
+      - name: Record release manifest
         id: snap
         env:
           GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+          IAC_REPO: aka-aka-proj/akaaka-iac
+          FRONTEND_REPO: aka-aka-proj/akaaka-frontend
+          DOCS_REPO: aka-aka-proj/akaaka-docs
         run: |
           set -euo pipefail
-          snap() {
-            repo="$1"; key="$2"
-            sha="$(gh api "repos/$repo/branches/preview" --jq '.commit.sha' 2>/dev/null || true)"
-            if [ -z "$sha" ]; then sha="absent"; fi
-            printf '%s=%s\n' "$key" "$sha" >> "$GITHUB_OUTPUT"
+          # preview -> main 的 release PR 快照（iac / frontend）
+          snap_release() {
+            local repo="$1" key="$2"
+            local head main pr entry
+            head="$(gh api "repos/$repo/branches/preview" --jq '.commit.sha' 2>/dev/null || true)"
+            main="$(gh api "repos/$repo/branches/main" --jq '.commit.sha' 2>/dev/null || true)"
+            pr="$(gh pr list -R "$repo" --base main --head preview --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+            [ -n "$head" ] || head="absent"
+            [ -n "$main" ] || main="absent"
+            entry="$(jq -cn --arg repo "$repo" --argjson pr "${pr:-null}" --arg head "$head" --arg base_sha "$main" \
+              '{repo:$repo,pr:$pr,head:$head,base_ref:"main",base_sha:$base_sha}')"
+            printf '%s=%s\n' "$key" "$entry" >> "$GITHUB_OUTPUT"
           }
-          snap aka-aka-proj/akaaka-iac iac
-          snap aka-aka-proj/akaaka-frontend frontend
+          snap_release "$IAC_REPO" iac
+          snap_release "$FRONTEND_REPO" frontend
 
-  release-iac:
-    name: Release akaaka-iac
+          # docs 無 preview 分支：快照每個開放中 task -> main release PR
+          docs_main="$(gh api "repos/$DOCS_REPO/branches/main" --jq '.commit.sha' 2>/dev/null || echo absent)"
+          doc_entries=()
+          while IFS=$'\t' read -r n h; do
+            [ -n "$n" ] || continue
+            doc_entries+=("$(jq -cn --arg repo "$DOCS_REPO" --argjson pr "$n" --arg head "$h" --arg base_sha "$docs_main" \
+              '{repo:$repo,pr:$pr,head:$head,base_ref:"main",base_sha:$base_sha}')")
+          done < <(gh pr list -R "$DOCS_REPO" --base main --state open --limit 200 --json number,headRefOid --jq '.[] | [.number,.headRefOid] | @tsv' 2>/dev/null || true)
+          if [ "${#doc_entries[@]}" -eq 0 ]; then
+            docs_json="[]"
+          else
+            docs_json="$(printf '%s\n' "${doc_entries[@]}" | jq -s -c '.')"
+          fi
+          printf 'docs=%s\n' "$docs_json" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # STAGE 1：akaaka-docs（merge-only，無部署監看）
+  # 僅合併「最新人工 APPROVED review 且其 reviewed commit == manifest 快照 head」的
+  # task -> main PR；approval 綁定較舊 commit 不具資格。序列合併採 base 推進：
+  # 預期 base = run 起點快照 base 或前一次 in-run merge 結果，其他值即外部變動。
+  # ------------------------------------------------------------------
+  release-docs:
+    name: Release akaaka-docs
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: [manifest]
@@ -79,23 +117,225 @@ jobs:
       pr: ${{ steps.release.outputs.pr }}
       sha: ${{ steps.release.outputs.sha }}
       deploy: ${{ steps.release.outputs.deploy }}
+      class: ${{ steps.release.outputs.class }}
       detail: ${{ steps.release.outputs.detail }}
     steps:
-      - name: Ensure preview -> main PR and merge
+      - name: Merge approved task -> main PRs
         id: release
         env:
-          REPO: aka-aka-proj/akaaka-iac
-          CD_WORKFLOW: iac-cd.yml
-          PINNED_SHA: ${{ needs.manifest.outputs.iac }}
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+          REPO: aka-aka-proj/akaaka-docs
+          PINNED_JSON: ${{ needs.manifest.outputs.docs }}
         run: |
           set -uo pipefail
-          result="failed"; pr=""; sha=""; deploy="unknown"; detail=""
+          result="failed"; pr=""; sha=""; deploy="not-applicable"; class="pre-merge-skipped"; detail=""
           cleanup() {
-            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\n' "$result" "$pr" "$sha" "$deploy" >> "$GITHUB_OUTPUT"
-            detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-300)"
+            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nclass=%s\n' \
+              "$result" "$pr" "$sha" "$deploy" "$class" >> "$GITHUB_OUTPUT"
+            detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-500)"
             printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
           }
           trap cleanup EXIT
+
+          # CAS merge 調和（#80 同源）：PUT 被 GitHub 接受但回應遺失（網路/API 錯誤）
+          # 不等於合併被拒——重新查詢 PR 狀態；MERGED 即取回 mergeCommit 照常進入監控，
+          # 否則（OPEN＝head moved 被 CAS 拒絕、或查詢失敗）維持 rejected 行為
+          cas_merge() { # repo pr expect_sha -> merge sha；失敗回傳非零
+            local r="$1" n="$2" s="$3" out st st_state msha
+            if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
+              printf '%s' "$out"; return 0
+            fi
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
+            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            return 1
+          }
+
+          if [ "$RELEASE_MODE" = "dry-run" ]; then
+            open_prs="$(gh pr list -R "$REPO" --base main --state open --limit 200 --json number --jq '[.[].number] | join(",")' 2>/dev/null || true)"
+            result="dry-run"; class=""
+            detail="dry-run: open docs release PRs=[${open_prs:-none}]; no mutations performed"
+            exit 0
+          fi
+
+          stage_deadline=$((SECONDS + 2700))
+          merged_count=0; last_pr=""; last_sha=""; last_merge_head=""
+          while IFS=$'\t' read -r n expect_head snap_base; do
+            [ -n "$n" ] || continue
+
+            # Approval binding：取最新一筆非 pending 的人類 review；排除 Bot/App、
+            # [bot] 後綴，並要求 reviewer 具寫入權限（OWNER/MEMBER/COLLABORATOR）
+            # ——公開 repo 外部帳號不得以自核准觸發高權限合併。
+            # reviewed commit 必須等於快照 head——核准後偷推 commit 不具合併資格。
+            latest="$(gh api "repos/$REPO/pulls/$n/reviews" --paginate 2>/dev/null | jq -s -c '
+              flatten
+              | map(select(.state != "PENDING"))
+              | map(select(.author_association as $a | $a == "OWNER" or $a == "MEMBER" or $a == "COLLABORATOR"))
+              | map(select((.user.type // "") != "Bot"))
+              | map(select(((.user.login // "") | ascii_downcase | endswith("[bot]")) | not))
+              | sort_by(.submitted_at // "")
+              | last // empty')"
+            appr_state="$(printf '%s' "$latest" | jq -r '.state // ""')"
+            appr_commit="$(printf '%s' "$latest" | jq -r '.commit_id // ""')"
+            appr_login="$(printf '%s' "$latest" | jq -r '.user.login // ""')"
+            if [ "$appr_state" != "APPROVED" ]; then
+              detail+="PR #$n skipped (awaiting human approval); "
+              continue
+            fi
+            if [ "$appr_commit" != "$expect_head" ]; then
+              detail+="PR #$n skipped (approval bound to older commit, not snapshot head); "
+              continue
+            fi
+            # 核准者即時權限查驗：author association 不保證目前具 write 權限
+            # （已降權成員仍可保留 MEMBER 標記）；僅 write/admin 算數，查詢失敗 fail-closed
+            perm="$(gh api "repos/$REPO/collaborators/$appr_login/permission" --jq '.permission' 2>/dev/null || echo "query-failed")"
+            case "$perm" in
+              write|admin) : ;;
+              *)
+                detail+="PR #$n skipped (approver $appr_login lacks current write permission: $perm); "
+                continue
+                ;;
+            esac
+
+            # 等 checks 全數完成且成功；有失敗立即跳過該 PR（stage 共享 deadline）
+            ok=1
+            while :; do
+              rollup="$(gh pr view "$n" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
+              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
+              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
+              mstate="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
+              if [ "${bad:-0}" -gt 0 ] || [ "$mstate" = "DIRTY" ]; then
+                detail+="PR #$n checks failed/conflicted; "; ok=0; break
+              fi
+              if [ "${pending:-0}" -eq 0 ] && { [ "$mstate" = "CLEAN" ] || [ "$mstate" = "HAS_HOOKS" ] || [ "$mstate" = "UNBLOCKED" ]; }; then
+                break
+              fi
+              if (( SECONDS >= stage_deadline )); then
+                detail+="PR #$n timed out waiting for checks; "; ok=0; break
+              fi
+              sleep 30
+            done
+            [ "$ok" -eq 1 ] || continue
+
+            # Manifest 全欄位驗證：head 不變、base ref 仍指 main、base SHA 未被外部推進
+            # （序列合併例外：base 可為本次 run 內前一個 merge 的結果——base 推進）
+            cur_head="$(gh api "repos/$REPO/pulls/$n" --jq '.head.sha')" || { result="aborted"; detail+="PR #$n head read failed; stage aborted"; exit 1; }
+            cur_base_ref="$(gh api "repos/$REPO/pulls/$n" --jq '.base.ref')" || { result="aborted"; detail+="PR #$n base ref read failed; stage aborted"; exit 1; }
+            cur_base_sha="$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')" || { result="aborted"; detail+="main head read failed; stage aborted"; exit 1; }
+            base_ok=0
+            [ "$cur_base_sha" = "$snap_base" ] && base_ok=1
+            { [ -n "$last_merge_head" ] && [ "$cur_base_sha" = "$last_merge_head" ]; } && base_ok=1
+            if [ "$cur_head" != "$expect_head" ] || [ "$cur_base_ref" != "main" ] || [ "$base_ok" -ne 1 ]; then
+              result="aborted"
+              detail+="PR #$n manifest mismatch (head=$cur_head expect=$expect_head baseref=$cur_base_ref base=$cur_base_sha); stage aborted"
+              exit 1
+            fi
+
+            # CAS merge：以快照 head 作為 expected-head precondition，由 GitHub 原子拒絕；
+            # merge 被拒即中止該階段（不得繼續處理排隊 PR）
+            merged="$(cas_merge "$REPO" "$n" "$expect_head")" || {
+              result="aborted"
+              detail+="PR #$n merge rejected (CAS precondition failed); stage aborted"; exit 1; }
+
+            # Merge 後驗證 merge commit 確實落在 main 上（ahead/identical = main 包含之）
+            containment="$(gh api "repos/$REPO/compare/$merged...main" --jq '.status')" || { result="aborted"; class="post-merge-failed"; detail+="post-merge containment check failed for PR #$n; stage aborted"; exit 1; }
+            case "$containment" in
+              ahead|identical) : ;;
+              *) result="aborted"; class="post-merge-failed"; detail+="merge commit of PR #$n not contained in main (status=$containment); stage aborted"; exit 1 ;;
+            esac
+
+            last_pr="$n"; last_sha="$merged"; last_merge_head="$merged"
+            merged_count=$((merged_count+1))
+            detail+="merged approved PR #$n ($merged); "
+          done < <(printf '%s' "$PINNED_JSON" | jq -r '.[] | [.pr, .head, .base_sha] | @tsv')
+
+          if [ "$merged_count" -eq 0 ]; then
+            result="no-changes"
+            detail="nothing merged — ${detail:-no eligible PRs}"
+            exit 0
+          fi
+          pr="$last_pr"; sha="$last_sha"; class=""
+          result="released"
+          detail="merged $merged_count approved docs PR(s); $detail"
+          exit 0
+
+  # ------------------------------------------------------------------
+  # STAGE 2：akaaka-iac
+  # 合併前執行 Docs-first binding 二次驗證與 evidence-based contract-step gate；
+  # 以 manifest 全欄位驗證＋CAS merge＋merge 後落點驗證；監看 iac-cd.yml（探測 10 分鐘／
+  # 自監看起算 40 分鐘終止輪詢），支援 resumed 有界窗口與 terminal failure 恢復路徑。
+  # ------------------------------------------------------------------
+  release-iac:
+    name: Release akaaka-iac
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: [manifest, release-docs]
+    outputs:
+      result: ${{ steps.release.outputs.result }}
+      pr: ${{ steps.release.outputs.pr }}
+      sha: ${{ steps.release.outputs.sha }}
+      deploy: ${{ steps.release.outputs.deploy }}
+      class: ${{ steps.release.outputs.class }}
+      run_id: ${{ steps.release.outputs.run_id }}
+      expands: ${{ steps.release.outputs.expands }}
+      pending_expands: ${{ steps.release.outputs.pending_expands }}
+      detail: ${{ steps.release.outputs.detail }}
+    steps:
+      - name: Ensure preview -> main PR, gates, merge, watch iac-cd
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+          REPO: aka-aka-proj/akaaka-iac
+          CD_WORKFLOW: iac-cd.yml
+          PINNED_SHA: ${{ fromJSON(needs.manifest.outputs.iac).head }}
+          PINNED_BASE_SHA: ${{ fromJSON(needs.manifest.outputs.iac).base_sha }}
+          UPSTREAM_RESULT: ${{ needs.release-docs.outputs.result }}
+        run: |
+          set -uo pipefail
+          result="failed"; pr=""; sha=""; deploy="unknown"; class="pre-merge-skipped"; run_id_out=""; expands_out="[]"; pending_out="[]"; resume_expands=""; detail=""
+          declare -a expand_nums=()
+          cleanup() {
+            # 唯有部署結論為 success / no-deploy 時，expand 才算真正出貨
+            if [ "${#expand_nums[@]}" -gt 0 ] && { [ "$deploy" = "success" ] || [ "$deploy" = "no-deploy" ]; }; then
+              local now entries=() en
+              now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              for en in "${expand_nums[@]}"; do
+                entries+=("$(jq -cn --argjson pr "$en" --arg sha "$sha" --arg t "$now" '{pr:$pr,sha:$sha,shipped_at:$t}')")
+              done
+              expands_out="$(printf '%s\n' "${entries[@]}" | jq -s -c '.')"
+              pending_out="[]"
+            elif [ "${#expand_nums[@]}" -gt 0 ]; then
+              # 已合併但部署未收斂：記為 pending，resume 成功時入帳——否則 evidence gate 永遠看不到此 expand
+              local entries2=() en2
+              for en2 in "${expand_nums[@]}"; do
+                entries2+=("$(jq -cn --argjson pr "$en2" '{pr:$pr}')")
+              done
+              pending_out="$(printf '%s\n' "${entries2[@]}" | jq -s -c '.')"
+            fi
+            if [ -n "$resume_expands" ] && { [ "$deploy" = "success" ] || [ "$deploy" = "no-deploy" ]; } && [ "$expands_out" = "[]" ]; then
+              expands_out="$resume_expands"
+              pending_out="[]"
+            fi
+            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nclass=%s\nrun_id=%s\nexpands=%s\npending_expands=%s\n' \
+              "$result" "$pr" "$sha" "$deploy" "$class" "$run_id_out" "$expands_out" "$pending_out" >> "$GITHUB_OUTPUT"
+            detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-700)"
+            printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
+          }
+          trap cleanup EXIT
+          # CAS merge 調和（#80 同源）：PUT 被 GitHub 接受但回應遺失（網路/API 錯誤）
+          # 不等於合併被拒——重新查詢 PR 狀態；MERGED 即取回 mergeCommit 照常進入監控，
+          # 否則（OPEN＝head moved 被 CAS 拒絕、或查詢失敗）維持 rejected 行為
+          cas_merge() { # repo pr expect_sha -> merge sha；失敗回傳非零
+            local r="$1" n="$2" s="$3" out st st_state msha
+            if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
+              printf '%s' "$out"; return 0
+            fi
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
+            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            return 1
+          }
+
 
           touches_cd_paths() {
             local f
@@ -107,42 +347,116 @@ jobs:
             done
             return 1
           }
-          # checkpoint 存於 orchestrator repo（GITHUB_REPOSITORY）；用各 stage 的 REPO 讀會在 frontend 找錯 repo，resume 靜默失效
+          touches_supabase_paths() {
+            local f
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                supabase/migrations/* | supabase/functions/*) return 0 ;;
+              esac
+            done
+            return 1
+          }
+          # checkpoint schema v2 將各 repo 收進 .repos；相容讀取舊版頂層鍵
           state_get() {
-            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.repos[$k] // .[$k] // empty' || true
+          }
+          state_get_raw() {
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true
+          }
+          # 解析 release range（main...preview）涉及的 task PR 集合：
+          # 每個 commit 先查 API 關聯 PR，再從訊息主題擷取 #N 參照，最後去重
+          resolve_range_prs() {
+            local s nums="" associated msg refs shas
+            shas="$(gh api "repos/$REPO/compare/main...preview" --jq '.commits[].sha' 2>/dev/null || true)"
+            for s in $shas; do
+              associated="$(gh api "repos/$REPO/commits/$s/pulls" --jq '.[].number' 2>/dev/null || true)"
+              [ -n "$associated" ] && nums+="$associated"$'\n'
+              msg="$(gh api "repos/$REPO/commits/$s" --jq '.commit.message' 2>/dev/null | head -n1 || true)"
+              refs="$(printf '%s' "$msg" | grep -oE '#[0-9]+' | tr -d '#' || true)"
+              [ -n "$refs" ] && nums+="$refs"$'\n'
+            done
+            printf '%s' "$nums" | sort -un
           }
 
-          ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
-          existing="$(gh pr list -R "$REPO" --base main --head preview --state open --json number --jq '.[0].number // ""')"
-
           if [ "$RELEASE_MODE" = "dry-run" ]; then
-            result="dry-run"
-            detail="dry-run: preview ahead_by=${ahead:-0}; open PR=${existing:-none}; no mutations performed"
+            ahead_dr="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by' 2>/dev/null || echo '?')"
+            existing_dr="$(gh pr list -R "$REPO" --base main --head preview --state open --limit 1 --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+            result="dry-run"; class=""
+            detail="dry-run: preview ahead_by=${ahead_dr}; open PR=${existing_dr:-none}; no mutations performed"
             exit 0
           fi
 
-          resume_watch=0
+          # 嚴格順序：上游（docs）未乾淨收斂時本階段不得執行任何寫入（pre-merge skip）
+          case "$UPSTREAM_RESULT" in
+            released|no-changes) : ;;
+            *)
+              result="skipped-upstream"
+              detail="strict order: docs stage did not conclude cleanly ($UPSTREAM_RESULT); no actions taken"
+              exit 0
+              ;;
+          esac
+
+          ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
+          existing="$(gh pr list -R "$REPO" --base main --head preview --state open --limit 1 --json number --jq '.[0].number // ""')"
+
+          resume_watch=0; resume_mode="fresh"; prev_run_id=""
           if [ "${ahead:-0}" -eq 0 ]; then
             prev="$(state_get iac)"
             prevsha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
             prevdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
-            if [ -n "$prevsha" ] && [ "$prevdep" != "success" ] && [ "$prevdep" != "no-deploy" ]; then
-              result="released"; sha="$prevsha"; deploy="verifying"; resume_watch=1
-              detail="resume: re-verifying deployment of previously merged $sha (last deploy=$prevdep)"
-            else
-              result="no-changes"; detail="preview even with main; previous release fully verified"; exit 0
-            fi
+            prev_run_id="$(printf '%s' "$prev" | jq -r '.run_id // ""')"
+            resume_expands="$(printf '%s' "$prev" | jq -r 'if ((.pending_expands // []) == []) then "" else (.pending_expands | tostring) end // ""' 2>/dev/null || echo "")"
+            [ "$resume_expands" = "null" ] && resume_expands=""
+            case "$prevdep" in
+              success|no-deploy|"")
+                # 收斂即視為無部署事實；下游 gate 接受 success|no-deploy|""
+                result="no-changes"; class=""; deploy="no-deploy"
+                detail="preview even with main; previous iac release fully verified"; exit 0 ;;
+              timeout-discovery|timeout-poll)
+                # timeout 結論：以 rerun 起點重建有界窗口恢復監看（resumed attempt）
+                result="released"; sha="$prevsha"; resume_watch=1; resume_mode="watch"
+                detail="resumed attempt: re-watching iac-cd for previously merged $sha (last=$prevdep) with fresh bounded windows" ;;
+              failed)
+                # terminal failure：無法靠監看復原——跟看 operator 綁定原 SHA 的新 attempt
+                # （re-run 同一 workflow run 或 redeploy），窗口內未出現即維持 awaiting remediation
+                result="released"; sha="$prevsha"; resume_watch=1; resume_mode="terminal-follow"
+                detail="resumed attempt: awaiting manual remediation for $sha; watching for a new attempt bound to the original SHA" ;;
+              *)
+                result="released"; sha="$prevsha"; resume_watch=1; resume_mode="watch"
+                detail="resumed attempt: re-verifying deployment of previously merged $sha (last deploy=${prevdep:-unknown})" ;;
+            esac
           else
             if [ -z "$existing" ]; then
               title="chore(release): weekly production release $(date -u +%F)"
+              # 聚合 range task PR 的宣告到自動建立之 release PR body——contract-gate 對觸及 supabase 路徑的 PR（含本 PR）強制要求這些欄位
+              agg_compat="backward-compatible"; agg_docs_tokens=""
+              for tn in $(resolve_range_prs); do
+                tfiles="$(gh api "repos/$REPO/pulls/$tn/files" --paginate --jq '.[].filename' 2>/dev/null || true)"
+                printf '%s' "$tfiles" | touches_supabase_paths || continue
+                tb="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null || true)"
+                c="$(printf '%s' "$tb" | awk 'tolower($0) ~ /^compatibility:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')"
+                case "$c" in
+                  contract-step) agg_compat="contract-step" ;;
+                  expand-only) [ "$agg_compat" = "backward-compatible" ] && agg_compat="expand-only" ;;
+                esac
+                d="$(printf '%s' "$tb" | awk 'tolower($0) ~ /^docs:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
+                case "$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')" in
+                  none|"") : ;;
+                  *) agg_docs_tokens+="${agg_docs_tokens:+ }$d" ;;
+                esac
+              done
+              agg_docs="$(printf '%s' "$agg_docs_tokens" | tr ',' '\n' | tr -s ' \t' '\n' | sort -u | grep -E '^[0-9]+$' | paste -sd, -)"
+              [ -n "$agg_docs" ] || agg_docs="none"
+              prbody="$(printf 'Automated weekly production release. Merges validated \`preview\` into \`main\`.\nCompatibility: %s\nDocs: %s\n\nContract: docs/spec/platform/001-vercel-deployment-spec.md' "$agg_compat" "$agg_docs")"
               pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
-                --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
+                --body "$prbody")" || { detail="PR creation failed for $REPO"; exit 0; }
               sleep 20  # 讓 checks 完成註冊
             else
               pr="$existing"
             fi
 
-            # 等 checks 全數完成且成功；有失敗立即中止
+            # 等 checks 全數完成且成功；有失敗立即中止（未達 merge，屬 pre-merge 停止）
             deadline=$((SECONDS + 2700))
             while :; do
               rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
@@ -164,11 +478,92 @@ jobs:
               sleep 30
             done
 
-            # Release manifest：merge 前驗證 PR head 仍等於 run 起點快照
+            # ---- Gate 1：Docs-first binding（orchestrator 於 merge 前二次驗證）----
+            # ---- Gate 2：Compatibility 宣告 ＋ evidence-based contract-step gate ----
+            contract_flag=0
+            for tn in $(resolve_range_prs); do
+              tfiles="$(gh api "repos/$REPO/pulls/$tn/files" --paginate --jq '.[].filename' 2>/dev/null || true)"
+              printf '%s' "$tfiles" | touches_supabase_paths || continue
+              tbody="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null || true)"
+
+              compat="$(printf '%s' "$tbody" | awk 'tolower($0) ~ /^compatibility:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')"
+              case "$compat" in
+                backward-compatible|expand-only|contract-step) : ;;
+                *)
+                  result="aborted"
+                  detail="task PR #$tn missing/malformed Compatibility declaration ('$compat'); undeclared contract steps cannot release"
+                  exit 1
+                  ;;
+              esac
+
+              docs_decl="$(printf '%s' "$tbody" | awk 'tolower($0) ~ /^docs:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
+              if [ -z "$docs_decl" ]; then
+                result="aborted"
+                detail="task PR #$tn missing Docs: declaration (docs-first binding required)"
+                exit 1
+              fi
+              if [ "$(printf '%s' "$docs_decl" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "none" ]; then
+                for dnum in $(printf '%s' "$docs_decl" | tr ',' ' '); do
+                  case "$dnum" in ''|*[!0-9]*) result="aborted"; detail="task PR #$tn Docs: reference '$dnum' is not a PR number"; exit 1 ;; esac
+                  dstamp="$(gh api "repos/$DOCS_REPO/pulls/$dnum" --jq '[(.state // ""),((.merged // false)|tostring),(.base.ref // "")] | @tsv' 2>/dev/null)" || {
+                    result="aborted"; detail="docs dependency PR #$dnum referenced by task PR #$tn not found in $DOCS_REPO"; exit 1; }
+                  dst="$(printf '%s' "$dstamp" | cut -f1)"; dmerged="$(printf '%s' "$dstamp" | cut -f2)"; dbase="$(printf '%s' "$dstamp" | cut -f3)"
+                  if [ "$dst" != "closed" ] || [ "$dmerged" != "true" ] || [ "$dbase" != "main" ]; then
+                    result="aborted"
+                    detail="docs-first binding violated: docs PR #$dnum referenced by task PR #$tn is not merged into $DOCS_REPO main (state=$dst merged=$dmerged)"
+                    exit 1
+                  fi
+                done
+              fi
+
+              if [ "$compat" = "expand-only" ]; then
+                expand_nums+=("$tn")
+              elif [ "$compat" = "contract-step" ]; then
+                contract_flag=1
+              fi
+            done
+
+            # Evidence-based contract-step gate：contract-step 宣告本身不中止 stage；
+            # 僅在 switch evidence 缺失時中止。證據＝stored release state 中每個已出貨
+            # expand 都存在「Consumes-Expand 指向它且部署 READY＋smoke 通過」的 frontend entry
+            if [ "${contract_flag:-0}" -eq 1 ]; then
+              state_raw="$(state_get_raw)"
+              # 同一 release 不得同時出貨新 expand 與 contract-step：
+              # 新 expand 本週才要部署，frontend consumer 不可能在更早取得成功證據；
+              # 唯有已存在於 state.expands 的舊 expand 才由下方 evidence 規則把關
+              for en in "${expand_nums[@]}"; do
+                if ! printf '%s' "$state_raw" | jq -e --argjson p "$en" 'any((.expands // [])[]; .pr == $p)' >/dev/null 2>&1; then
+                  result="aborted"
+                  detail="contract-step blocked: expand-only task PR #$en is new in this same release; ship the expand first, land a consuming frontend release (READY+smoke), then contract in a later weekly release"
+                  exit 1
+                fi
+              done
+              unconsumed="$(printf '%s' "$state_raw" | jq -r '
+                . as $root
+                | [ (($root.expands // [])[].pr) as $ep
+                    | select( ((($root.consumptions // []) | map(select(.expand_pr == $ep and .conclusion == "success"))) | length) == 0 )
+                    | "#\($ep)" ]
+                | unique | join(", ")')"
+              if [ -n "$unconsumed" ]; then
+                result="aborted"
+                detail="contract-step blocked by consumer-switch evidence gate: shipped expands without a successful consuming frontend entry: $unconsumed"
+                exit 1
+              fi
+            fi
+
+            # Release manifest 全欄位驗證（head-only 抓不到 base 外部變動）
             cur_head="$(gh api "repos/$REPO/branches/preview" --jq '.commit.sha')" || { detail="failed to read current preview head"; exit 0; }
+            cur_base_ref="$(gh pr view "$pr" -R "$REPO" --json baseRefName --jq '.baseRefName')" || { detail="failed to read PR base ref"; exit 0; }
+            cur_base_sha="$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')" || { detail="failed to read main head"; exit 0; }
             if [ "$cur_head" != "$PINNED_SHA" ]; then
-              # abort 必須讓 job 失敗，GitHub Actions 才會 skip 下游 stage，維持 IaC -> Frontend 發版順序
+              # abort 必須讓 job 失敗，GitHub Actions 才會 skip 下游 stage，維持嚴格順序
               result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
+            fi
+            if [ "$cur_base_ref" != "main" ]; then
+              result="aborted"; detail="release PR base ref changed to '$cur_base_ref'; stage aborted"; exit 1
+            fi
+            if [ "$cur_base_sha" != "$PINNED_BASE_SHA" ]; then
+              result="aborted"; detail="main advanced externally during run (snapshot $PINNED_BASE_SHA -> $cur_base_sha); stage aborted"; exit 1
             fi
 
             # iac-cd.yml 只在特定路徑變更時觸發；必須在 merge 前比對 diff（merge 後 main...preview 為空）
@@ -177,77 +572,114 @@ jobs:
             if printf '%s' "$cd_files" | touches_cd_paths; then will_deploy=1; fi
 
             # CAS merge：以 expected-head sha 原子拒絕 head 已變動的合併
-            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控；
-            # 否則視為 rejected（head moved / API 錯誤），本次無新部署事實
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
-            if [ -z "$sha" ]; then
-              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
-              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
-                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
-                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
-              else
-                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
-              fi
-            fi
+            sha="$(cas_merge "$REPO" "$pr" "$cur_head")" || { detail="merge of PR #$pr rejected (head moved, state changed, or response lost without recorded merge)"; exit 0; }
             result="released"
+
+            # Merge 後驗證 merge commit 落在預期整合分支上
+            containment="$(gh api "repos/$REPO/compare/$sha...main" --jq '.status')" || { result="aborted"; class="post-merge-failed"; detail="post-merge containment check failed; stage aborted"; exit 1; }
+            case "$containment" in
+              ahead|identical) : ;;
+              *) result="aborted"; class="post-merge-failed"; detail="merge commit not contained in main (status=$containment); stage aborted"; exit 1 ;;
+            esac
 
             if [ "$will_deploy" -eq 0 ]; then
               # 新 merge 未觸發 CD 不代表前次失敗已解決：保留 prevsha+failed，供下次 run 繼續驗證而非永久跳過
               prev="$(state_get iac)"
               psha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
               pdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
-              if [ -n "$psha" ] && [ "$pdep" != "success" ] && [ "$pdep" != "no-deploy" ]; then
+              if [ -n "$psha" ] && [ "$pdep" != "success" ] && [ "$pdep" != "no-deploy" ] && [ "$psha" != "$sha" ]; then
                 new_sha="$sha"; sha="$psha"; deploy="failed"
+                class="post-merge-failed"
                 detail="merged PR #$pr ($new_sha) with no CD trigger paths; previous deployment of $psha still $pdep, keeping failed state"
-                exit 1
+                exit 0
               fi
-              deploy="no-deploy"; detail="merged PR #$pr ($sha); no iac-cd.yml trigger paths changed"; exit 0
+              deploy="no-deploy"; class=""
+              detail="merged PR #$pr ($sha); no iac-cd.yml trigger paths changed"
+              exit 0
             fi
+            # 有 CD 觸發路徑：落入下方監看；expand 於部署結論為 success 時才由 cleanup 登記
           fi
 
           if [ "$resume_watch" -eq 1 ]; then
-            # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過；
-            # commit 可能超過單頁 30 檔，必須分頁取得完整檔案清單再判斷觸發路徑
-            if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --paginate --jq '.files[].filename')"; then
-              deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 1
-            fi
-            will_deploy=0
-            if printf '%s' "$commit_files" | touches_cd_paths; then will_deploy=1; fi
-            if [ "$will_deploy" -eq 0 ]; then
-              deploy="no-deploy"; detail="resume: previous merge $sha touched no iac-cd.yml trigger paths"; exit 0
+            # API 失敗不得視為「無 CD 觸發路徑」：保留失敗狀態，下次 run 再重新驗證
+            if [ "$resume_mode" != "terminal-follow" ]; then
+              # Get a commit 單頁上限 30 檔；CD 觸發路徑落在後續頁時會誤判 no-deploy，
+              # 故必須 --paginate（#79 同源修復）
+              if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --paginate --jq '.files[].filename' 2>/dev/null)"; then
+                deploy="failed"; class="post-merge-failed"
+                detail="resume: commit files API failed for $sha; keeping unresolved state for next-run retry"; exit 0
+              fi
+              will_deploy=0
+              if printf '%s' "$commit_files" | touches_cd_paths; then will_deploy=1; fi
+              if [ "$will_deploy" -eq 0 ]; then
+                deploy="no-deploy"; class=""
+                detail="resumed attempt: previous merge $sha touched no iac-cd.yml trigger paths"; exit 0
+              fi
             fi
           fi
 
-          # 監看 main 上的 iac-cd.yml run 直到結束
-          deadline=$((SECONDS + 2400))
+          # 監看 main 上的 iac-cd.yml run 直到結束（有界：探測 10 分鐘、輪詢自監看起算 40 分鐘）
+          watch_start=$SECONDS
+          disc_deadline=$((watch_start + 600))
+          poll_deadline=$((watch_start + 2400))
+          found_run=""
           while :; do
-            # 以 commit SHA 伺服器端篩選，避免較新 run 超過 limit 後永遠找不到目標 run（含 operator 的 rerun attempt）
-            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --commit "$sha" --limit 30 --json databaseId,status,conclusion)"
-            run="$(printf '%s' "$run_json" | jq -r '[.[]][0].databaseId // ""')"
-            if [ -n "$run" ]; then
-              st="$(gh run view "$run" -R "$REPO" --json status,conclusion)"
+            if [ -n "$prev_run_id" ]; then
+              # resume：優先跟看原 run（re-run attempt 會更新同 run 的 status）
+              st="$(gh run view "$prev_run_id" -R "$REPO" --json status,conclusion,headSha 2>/dev/null || true)"
+              st_sha="$(printf '%s' "$st" | jq -r '.headSha // ""')"
+              if [ "$st_sha" = "$sha" ]; then
+                found_run="$prev_run_id"
+              else
+                prev_run_id=""  # 原 run 已不存在或 SHA 不符，退回一般探測
+              fi
+            fi
+            if [ -z "$found_run" ]; then
+              # 以 commit SHA 伺服器端篩選：較新 run 超過 limit 後仍能找到目標
+              # （含 operator 的 rerun attempt）（a20a0e1 同源修復）
+              run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --commit "$sha" --limit 30 --json databaseId,status,conclusion)"
+              found_run="$(printf '%s' "$run_json" | jq -r '[.[]][0].databaseId // ""')"
+            fi
+            if [ -n "$found_run" ]; then
+              run_id_out="$found_run"
+              st="$(gh run view "$found_run" -R "$REPO" --json status,conclusion)"
               status="$(printf '%s' "$st" | jq -r '.status')"; conc="$(printf '%s' "$st" | jq -r '.conclusion')"
               if [ "$status" = "completed" ]; then
                 if [ "$conc" = "success" ]; then
-                  deploy="success"
-                  detail="Supabase production deploy succeeded (run https://github.com/$REPO/actions/runs/$run)"
+                  deploy="success"; class=""
+                  detail="Supabase production deploy succeeded (run https://github.com/$REPO/actions/runs/$found_run)${resume_watch:+; resumed attempt}"
                 else
-                  deploy="failed"
-                  detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run); awaiting manual remediation: rerun that run or revert/hotfix — orchestrator never auto-retries (spec 001)"
+                  # terminal failure：無法靠監看復原——awaiting manual remediation，
+                  # 建議 rerun 該 workflow run 或 redeploy 原 SHA，或 revert/hotfix
+                  deploy="failed"; class="post-merge-failed"
+                  detail="Supabase production deploy concluded '$conc' — awaiting manual remediation: rerun https://github.com/$REPO/actions/runs/$found_run or redeploy exactly $sha, or revert/hotfix${resume_watch:+; resumed attempt}"
                 fi
-                # 嚴格順序：IaC 部署失敗／逾時讓 stage 失敗，GitHub Actions skip 下游 stage
-                case "$deploy" in failed|timeout) exit 1 ;; esac
                 exit 0
               fi
-            elif (( SECONDS > 600 )); then
-              deploy="failed"; detail="iac-cd.yml run for $sha not found within 10 minutes"; exit 1
+            elif (( SECONDS > disc_deadline )); then
+              if [ "$resume_mode" = "terminal-follow" ]; then
+                deploy="failed"; class="post-merge-failed"
+                detail="no new iac-cd attempt bound to $sha appeared within 10 minutes — still awaiting manual remediation (rerun the failed run or redeploy exactly this SHA)"
+              else
+                deploy="timeout-discovery"; class="post-merge-failed"
+                detail="iac-cd.yml run for $sha not found within 10 minutes (resumable: fresh discovery window next rerun)${resume_watch:+; resumed attempt}"
+              fi
+              exit 0
             fi
-            if (( SECONDS >= deadline )); then
-              deploy="timeout"; detail="timed out watching iac-cd.yml for $sha"; exit 1
+            if (( SECONDS >= poll_deadline )); then
+              deploy="timeout-poll"; class="post-merge-failed"
+              detail="timed out watching iac-cd.yml for $sha (non-terminal past 40-minute deadline; resumable next rerun)${resume_watch:+; resumed attempt}"
+              exit 0
             fi
             sleep 30
           done
 
+  # ------------------------------------------------------------------
+  # STAGE 3：akaaka-frontend
+  # Vercel 監看拆分：10 分鐘內找到符合 merged SHA 的 production deployment，
+  # 自監看起算 40 分鐘內仍未達終止狀態即 timeout。結論拆存 deployment terminal
+  # state 與 SPA smoke check outcome，各自擁有獨立的 resume 行為。
+  # ------------------------------------------------------------------
   release-frontend:
     name: Release akaaka-frontend
     runs-on: ubuntu-latest
@@ -258,55 +690,182 @@ jobs:
       pr: ${{ steps.release.outputs.pr }}
       sha: ${{ steps.release.outputs.sha }}
       deploy: ${{ steps.release.outputs.deploy }}
+      smoke: ${{ steps.release.outputs.smoke }}
+      class: ${{ steps.release.outputs.class }}
+      vercel_uid: ${{ steps.release.outputs.vercel_uid }}
+      consumptions: ${{ steps.release.outputs.consumptions }}
+      pending_consumptions: ${{ steps.release.outputs.pending_consumptions }}
       detail: ${{ steps.release.outputs.detail }}
     steps:
-      - name: Ensure preview -> main PR, merge, watch Vercel
+      - name: Ensure preview -> main PR, merge, watch Vercel, smoke check
         id: release
         env:
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
           REPO: aka-aka-proj/akaaka-frontend
-          PINNED_SHA: ${{ needs.manifest.outputs.frontend }}
+          PINNED_SHA: ${{ fromJSON(needs.manifest.outputs.frontend).head }}
+          PINNED_BASE_SHA: ${{ fromJSON(needs.manifest.outputs.frontend).base_sha }}
+          UPSTREAM_RESULT: ${{ needs.release-iac.outputs.result }}
+          UPSTREAM_DEPLOY: ${{ needs.release-iac.outputs.deploy }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
           set -uo pipefail
-          result="failed"; pr=""; sha=""; deploy="unknown"; detail=""
+          result="failed"; pr=""; sha=""; deploy="unknown"; smoke_out=""; class="pre-merge-skipped"; uid_out=""; cons_out="[]"; pend_cons_out="[]"; resume_cons=""; detail=""
+          declare -a cons_pending=()
           cleanup() {
-            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\n' "$result" "$pr" "$sha" "$deploy" >> "$GITHUB_OUTPUT"
-            detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-300)"
+            # 完整成功結論（READY＋smoke 通過）才登記 Consumes-Expand 配對
+            if [ "${#cons_pending[@]}" -gt 0 ] && [ "$deploy" = "success" ] && [ "$smoke_out" = "passed" ] && [ -n "$sha" ]; then
+              local entries=() pair tn ce
+              for pair in "${cons_pending[@]}"; do
+                ce="${pair%%:*}"; tn="${pair##*:}"
+                entries+=("$(jq -cn --argjson e "$ce" --argjson t "$tn" --arg s "$sha" \
+                  '{expand_pr:$e,task_pr:$t,frontend_sha:$s,conclusion:"success"}')")
+              done
+              cons_out="$(printf '%s\n' "${entries[@]}" | jq -s -c '.')"
+              pend_cons_out="[]"
+            elif [ "${#cons_pending[@]}" -gt 0 ] && [ -n "$sha" ]; then
+              # 部署未收斂：配對記為 pending，resume 成功時轉正為 success
+              local pentries=() ppair ptn pce
+              for ppair in "${cons_pending[@]}"; do
+                pce="${ppair%%:*}"; ptn="${ppair##*:}"
+                pentries+=("$(jq -cn --argjson e "$pce" --argjson t "$ptn" --arg s "$sha" \
+                  '{expand_pr:$e,task_pr:$t,frontend_sha:$s,conclusion:"pending"}')")
+              done
+              pend_cons_out="$(printf '%s\n' "${pentries[@]}" | jq -s -c '.')"
+            fi
+            if [ -n "$resume_cons" ] && [ "$deploy" = "success" ] && [ "$smoke_out" = "passed" ] && [ "$cons_out" = "[]" ]; then
+              cons_out="$(printf '%s' "$resume_cons" | jq -c '[.[] | .conclusion = "success"]')"
+              pend_cons_out="[]"
+            fi
+            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nsmoke=%s\nclass=%s\nvercel_uid=%s\nconsumptions=%s\npending_consumptions=%s\n' \
+              "$result" "$pr" "$sha" "$deploy" "$smoke_out" "$class" "$uid_out" "$cons_out" "$pend_cons_out" >> "$GITHUB_OUTPUT"
+            detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-700)"
             printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
           }
           trap cleanup EXIT
-
-          # checkpoint 存於 orchestrator repo（GITHUB_REPOSITORY）；用各 stage 的 REPO 讀會在 frontend 找錯 repo，resume 靜默失效
-          state_get() {
-            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+          # CAS merge 調和（#80 同源）：PUT 被 GitHub 接受但回應遺失（網路/API 錯誤）
+          # 不等於合併被拒——重新查詢 PR 狀態；MERGED 即取回 mergeCommit 照常進入監控，
+          # 否則（OPEN＝head moved 被 CAS 拒絕、或查詢失敗）維持 rejected 行為
+          cas_merge() { # repo pr expect_sha -> merge sha；失敗回傳非零
+            local r="$1" n="$2" s="$3" out st st_state msha
+            if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
+              printf '%s' "$out"; return 0
+            fi
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
+            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            return 1
           }
 
-          ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
-          existing="$(gh pr list -R "$REPO" --base main --head preview --state open --json number --jq '.[0].number // ""')"
+
+          # checkpoint schema v2 將各 repo 收進 .repos；相容讀取舊版頂層鍵
+          state_get() {
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.repos[$k] // .[$k] // empty' || true
+          }
+          resolve_range_prs() {
+            local s nums="" associated msg refs shas
+            shas="$(gh api "repos/$REPO/compare/main...preview" --jq '.commits[].sha' 2>/dev/null || true)"
+            for s in $shas; do
+              associated="$(gh api "repos/$REPO/commits/$s/pulls" --jq '.[].number' 2>/dev/null || true)"
+              [ -n "$associated" ] && nums+="$associated"$'\n'
+              msg="$(gh api "repos/$REPO/commits/$s" --jq '.commit.message' 2>/dev/null | head -n1 || true)"
+              refs="$(printf '%s' "$msg" | grep -oE '#[0-9]+' | tr -d '#' || true)"
+              [ -n "$refs" ] && nums+="$refs"$'\n'
+            done
+            printf '%s' "$nums" | sort -un
+          }
+          spa_smoke() { # SPA route smoke check：直接請求 client-side route 須取得應用文件而非平台 404
+            local http_code
+            http_code="$(curl -sS -o /tmp/spa_check.html -w '%{http_code}' --max-time 30 \
+              "https://akaaka-frontend.vercel.app/settings/security-privacy" || true)"
+            if [ "$http_code" != "200" ] || ! grep -qi '<div id="root"' /tmp/spa_check.html 2>/dev/null; then
+              return 1
+            fi
+            return 0
+          }
 
           if [ "$RELEASE_MODE" = "dry-run" ]; then
-            result="dry-run"
-            detail="dry-run: preview ahead_by=${ahead:-0}; open PR=${existing:-none}; no mutations performed"
+            ahead_dr="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by' 2>/dev/null || echo '?')"
+            existing_dr="$(gh pr list -R "$REPO" --base main --head preview --state open --limit 1 --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+            result="dry-run"; class=""
+            detail="dry-run: preview ahead_by=${ahead_dr}; open PR=${existing_dr:-none}; no mutations performed"
             exit 0
           fi
 
+          # 嚴格順序：上游（iac）未乾淨收斂時本階段不得執行任何寫入（pre-merge skip）
+          case "$UPSTREAM_RESULT" in
+            released|no-changes)
+              case "$UPSTREAM_DEPLOY" in
+                success|no-deploy|"") : ;;
+                *)
+                  result="skipped-upstream"
+                  detail="strict order: iac deploy conclusion is '$UPSTREAM_DEPLOY'; no actions taken"
+                  exit 0
+                  ;;
+              esac
+              ;;
+            *)
+              result="skipped-upstream"
+              detail="strict order: iac stage did not conclude cleanly ($UPSTREAM_RESULT); no actions taken"
+              exit 0
+              ;;
+          esac
+
+          ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
+          existing="$(gh pr list -R "$REPO" --base main --head preview --state open --limit 1 --json number --jq '.[0].number // ""')"
+
+          resume_mode="fresh"; prev_uid=""
           if [ "${ahead:-0}" -eq 0 ]; then
             prev="$(state_get frontend)"
             prevsha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
             prevdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
-            if [ -n "$prevsha" ] && [ "$prevdep" != "success" ]; then
-              result="released"; sha="$prevsha"
-              detail="resume: re-verifying Vercel deployment of previously merged $sha (last deploy=$prevdep)"
+            prevsmoke="$(printf '%s' "$prev" | jq -r '.smoke // ""')"
+            prev_uid="$(printf '%s' "$prev" | jq -r '.vercel_uid // ""')"
+            resume_cons="$(printf '%s' "$prev" | jq -r 'if ((.pending_consumptions // []) == []) then "" else (.pending_consumptions | tostring) end // ""' 2>/dev/null || echo "")"
+            [ "$resume_cons" = "null" ] && resume_cons=""
+            if [ -z "$prevsha" ]; then
+              result="no-changes"; class=""
+              detail="preview even with main; no pending frontend state"; exit 0
+            fi
+            if [ "$prevdep" = "success" ]; then
+              if [ "$prevsmoke" = "passed" ]; then
+                result="no-changes"; class=""
+                detail="preview even with main; previous frontend release fully verified (READY + smoke passed)"; exit 0
+              fi
+              # READY 但 smoke 失敗：僅對同一 merged SHA 重跑 smoke check，不重新合併、不重新輪詢
+              result="released"; sha="$prevsha"; deploy="success"; resume_mode="smoke-only"
+              detail="resumed attempt: deployment of $sha already READY; re-running SPA smoke check only (last smoke=${prevsmoke:-unknown})"
             else
-              result="no-changes"; detail="preview even with main; previous release fully verified"; exit 0
+              case "$prevdep" in
+                timeout-discovery|timeout-poll)
+                  result="released"; sha="$prevsha"; resume_mode="watch"
+                  detail="resumed attempt: re-watching Vercel deployment of previously merged $sha (last=$prevdep) with fresh bounded windows" ;;
+                failed)
+                  result="released"; sha="$prevsha"; resume_mode="terminal-follow"
+                  detail="resumed attempt: awaiting manual remediation for $sha; watching for a NEW Vercel deployment bound to the original SHA" ;;
+                *)
+                  result="released"; sha="$prevsha"; resume_mode="watch"
+                  detail="resumed attempt: re-verifying Vercel deployment of previously merged $sha (last deploy=${prevdep:-unknown})" ;;
+              esac
             fi
           else
             if [ -z "$existing" ]; then
               title="chore(release): weekly production release $(date -u +%F)"
+              # 聚合 range task PR 的 Consumes-Expand 宣告——consumes-expand-gate 對所有 PR（含本 release PR）強制要求此欄位
+              agg_cons_tokens=""
+              for tn in $(resolve_range_prs); do
+                tb="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null || true)"
+                ce="$(printf '%s' "$tb" | awk 'tolower($0) ~ /^consumes-expand:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
+                [ -n "$ce" ] || continue
+                [ "$(printf '%s' "$ce" | tr '[:upper:]' '[:lower:]')" = "none" ] && continue
+                agg_cons_tokens+="${agg_cons_tokens:+ }$ce"
+              done
+              agg_cons="$(printf '%s' "$agg_cons_tokens" | tr ',' '\n' | tr -s ' \t' '\n' | sort -un | grep -E '^[0-9]+$' | paste -sd, -)"
+              [ -n "$agg_cons" ] || agg_cons="none"
+              prbody="$(printf 'Automated weekly production release. Merges validated \`preview\` into \`main\`.\nConsumes-Expand: %s\n\nContract: docs/spec/platform/001-vercel-deployment-spec.md' "$agg_cons")"
               pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
-                --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
+                --body "$prbody")" || { detail="PR creation failed for $REPO"; exit 0; }
               sleep 20
             else
               pr="$existing"
@@ -333,232 +892,226 @@ jobs:
               sleep 30
             done
 
-            # Release manifest：merge 前驗證 PR head 仍等於 run 起點快照
+            # 解析 release range 的 frontend task PR 之 Consumes-Expand 宣告
+            # （格式由 frontend CI 強制；此處僅讀取作為 switch-evidence 配對來源）
+            for tn in $(resolve_range_prs); do
+              tbody="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null || true)"
+              ce_val="$(printf '%s' "$tbody" | awk 'tolower($0) ~ /^consumes-expand:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
+              [ -n "$ce_val" ] || continue
+              [ "$(printf '%s' "$ce_val" | tr '[:upper:]' '[:lower:]')" = "none" ] && continue
+              for cnum in $(printf '%s' "$ce_val" | tr ',' ' '); do
+                case "$cnum" in ''|*[!0-9]*) continue ;; esac
+                cons_pending+=("${cnum}:${tn}")
+              done
+            done
+
+            # Release manifest 全欄位驗證
             cur_head="$(gh api "repos/$REPO/branches/preview" --jq '.commit.sha')" || { detail="failed to read current preview head"; exit 0; }
+            cur_base_ref="$(gh pr view "$pr" -R "$REPO" --json baseRefName --jq '.baseRefName')" || { detail="failed to read PR base ref"; exit 0; }
+            cur_base_sha="$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')" || { detail="failed to read main head"; exit 0; }
             if [ "$cur_head" != "$PINNED_SHA" ]; then
-              # abort 必須讓 job 失敗，GitHub Actions 才會 skip 下游 stage，維持 IaC -> Frontend 發版順序
               result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
             fi
-
-            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
-            if [ -z "$sha" ]; then
-              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
-              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
-                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
-                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
-              else
-                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
-              fi
+            if [ "$cur_base_ref" != "main" ]; then
+              result="aborted"; detail="release PR base ref changed to '$cur_base_ref'; stage aborted"; exit 1
             fi
+            if [ "$cur_base_sha" != "$PINNED_BASE_SHA" ]; then
+              result="aborted"; detail="main advanced externally during run (snapshot $PINNED_BASE_SHA -> $cur_base_sha); stage aborted"; exit 1
+            fi
+
+            # CAS merge：以 expected-head sha 原子拒絕 head 已變動的合併
+            sha="$(cas_merge "$REPO" "$pr" "$cur_head")" || { detail="merge of PR #$pr rejected (head moved, state changed, or response lost without recorded merge)"; exit 0; }
             result="released"
+
+            # Merge 後驗證 merge commit 落在預期整合分支上
+            containment="$(gh api "repos/$REPO/compare/$sha...main" --jq '.status')" || { result="aborted"; class="post-merge-failed"; detail="post-merge containment check failed; stage aborted"; exit 1; }
+            case "$containment" in
+              ahead|identical) : ;;
+              *) result="aborted"; class="post-merge-failed"; detail="merge commit not contained in main (status=$containment); stage aborted"; exit 1 ;;
+            esac
           fi
 
-          # 輪詢 Vercel：先在 10 分鐘內找到 merge commit SHA 對應的 production deployment，
-          # 再於後續 30 分鐘內等到終止狀態（READY／ERROR／CANCELED）
+          # smoke-only resume：不重新合併、不重新輪詢，僅對同一 merged SHA 重跑 smoke check
+          if [ "$resume_mode" = "smoke-only" ]; then
+            if spa_smoke; then
+              smoke_out="passed"; class=""
+              detail="SPA route smoke check passed (re-run only) for $sha"
+            else
+              smoke_out="failed"; class="post-merge-failed"
+              detail="SPA route smoke check failed again for READY deployment $sha — investigate application health; revert/hotfix recommended"
+            fi
+            exit 0
+          fi
+
+          # 輪詢 Vercel（有界）：探測 10 分鐘、終止狀態輪詢自監看起算 40 分鐘。
+          # terminal-follow（前次 ERROR/CANCELED）只接受「新的」deployment（uid 不同）。
           vercel_uid=""
-          disc_deadline=$((SECONDS + 600))
-          poll_deadline=$((disc_deadline + 1800))
+          watch_start=$SECONDS
+          disc_deadline=$((watch_start + 600))
+          poll_deadline=$((watch_start + 2400))
           while :; do
             resp="$(curl -fsS --max-time 30 \
               "https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&teamId=${VERCEL_ORG_ID}&target=production&limit=20" \
               -H "Authorization: Bearer ${VERCEL_TOKEN}")"
-            entry="$(printf '%s' "$resp" | jq -c "[.deployments[]? | select(.meta.githubCommitSha == \"$sha\")][0] // \"\"")"
-            if [ -n "$entry" ] && [ "$entry" != '""' ]; then
-              vercel_uid="$(printf '%s' "$entry" | jq -r '.uid')"
-              rstate="$(printf '%s' "$entry" | jq -r '.readyState // .state // ""')"
+            matched="$(printf '%s' "$resp" | jq -c "[.deployments[]? | select(.meta.githubCommitSha == \"$sha\")]")"
+            # 逐一檢查所有符合 merged SHA 的部署：terminal-follow 需略過舊失敗 uid，
+            # 否則舊部署排第一時新 attempt 永遠不會被檢查
+            while IFS= read -r cand; do
+              [ -n "$cand" ] || continue
+              cand_uid="$(printf '%s' "$cand" | jq -r '.uid')"
+              if [ "$resume_mode" = "terminal-follow" ] && [ -n "$prev_uid" ] && [ "$cand_uid" = "$prev_uid" ]; then
+                continue # 忽略舊的失敗 deployment，等待 operator 觸發的新 attempt
+              fi
+              vercel_uid="$cand_uid"; uid_out="$vercel_uid"
+              rstate="$(printf '%s' "$cand" | jq -r '.readyState // .state // ""')"
               case "$rstate" in
                 READY)
-                  deploy="success"
-                  detail="Vercel production deploy READY (uid=$vercel_uid)"
+                  deploy="success"; class=""
+                  detail="Vercel production deploy READY (uid=$vercel_uid)${resume_mode:+; resumed attempt}"
                   break ;;
                 ERROR|CANCELED|CANCELLED)
-                  deploy="failed"
-                  detail="Vercel production deploy concluded '$rstate' (uid=$vercel_uid)"
+                  deploy="failed"; class="post-merge-failed"
+                  detail="Vercel production deploy concluded '$rstate' (uid=$vercel_uid) — awaiting manual remediation: redeploy exactly $sha or revert/hotfix${resume_mode:+; resumed attempt}"
                   break ;;
                 *)
                   : ;;
               esac
+            done < <(printf '%s' "$matched" | jq -c '.[]')
+            if [ -n "$vercel_uid" ] && { [ "$deploy" = "success" ] || [ "$deploy" = "failed" ]; }; then
+              break
             fi
             if [ -z "$vercel_uid" ] && (( SECONDS >= disc_deadline )); then
-              deploy="failed"
-              detail="Vercel production deployment for $sha not found within 10 minutes"
+              if [ "$resume_mode" = "terminal-follow" ]; then
+                # 新 attempt 未出現：維持 blocked（awaiting remediation）；不得回報 no changes
+                deploy="failed"; class="post-merge-failed"
+                detail="no new Vercel attempt for $sha appeared within 10 minutes — still awaiting manual remediation (redeploy exactly this SHA or revert/hotfix)"
+              else
+                deploy="timeout-discovery"; class="post-merge-failed"
+                detail="Vercel production deployment for $sha not found within 10 minutes (resumable: fresh discovery window next rerun)${resume_mode:+; resumed attempt}"
+              fi
               break
             fi
             if (( SECONDS >= poll_deadline )); then
-              deploy="timeout"
-              detail="timed out waiting for Vercel production deployment of $sha"
+              deploy="timeout-poll"; class="post-merge-failed"
+              detail="timed out waiting for Vercel production deployment of $sha (non-terminal past 40-minute deadline; resumable next rerun)${resume_mode:+; resumed attempt}"
               break
             fi
             sleep 30
           done
 
-          # SPA route smoke check：直接請求 client-side route 必須拿到應用文件而非平台 404
+          # SPA route smoke check：deployment READY 後對 /settings/security-privacy 驗證
           if [ "$deploy" = "success" ]; then
-            http_code="$(curl -sS -o /tmp/spa_check.html -w '%{http_code}' --max-time 30 \
-              "https://akaaka-frontend.vercel.app/settings/security-privacy")"
-            if [ "$http_code" != "200" ] || ! grep -qi '<div id="root"' /tmp/spa_check.html; then
-              deploy="failed"
-              detail="SPA route smoke check failed (HTTP $http_code) for /settings/security-privacy"
-            else
+            if spa_smoke; then
+              smoke_out="passed"; class=""
               detail="$detail; SPA route smoke check passed"
+            else
+              # 部署終止狀態仍是 READY；smoke 結論獨立保存，rerun 僅重跑 smoke
+              smoke_out="failed"; class="post-merge-failed"
+              detail="$detail; SPA route smoke check failed (HTTP error or platform 404) for /settings/security-privacy — rerun re-executes smoke check only; revert/hotfix recommended"
             fi
           fi
-          # 部署失敗／逾時必須讓 stage 失敗，GitHub Actions 才會 skip 下游 stage，落實「第一個失敗即中止」的發佈順序
-          case "$deploy" in
-            failed|timeout)
-              exit 1 ;;
-            *)
-              exit 0 ;;
-          esac
-
-  release-docs:
-    name: Release akaaka-docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    needs: [manifest, release-frontend]
-    outputs:
-      result: ${{ steps.release.outputs.result }}
-      pr: ${{ steps.release.outputs.pr }}
-      sha: ${{ steps.release.outputs.sha }}
-      deploy: ${{ steps.release.outputs.deploy }}
-      detail: ${{ steps.release.outputs.detail }}
-    steps:
-      - name: Ensure preview/main sync and merge
-        id: release
-        env:
-          REPO: aka-aka-proj/akaaka-docs
-        run: |
-          set -uo pipefail
-          result="failed"; pr=""; sha=""; deploy="not-applicable"; detail=""
-          cleanup() {
-            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\n' "$result" "$pr" "$sha" "$deploy" >> "$GITHUB_OUTPUT"
-            detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-300)"
-            printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
-          }
-          trap cleanup EXIT
-
-          # 新契約：docs 無 preview 分支；orchestrator 合併「已人工核准的 task -> main PR」
-          if [ "$RELEASE_MODE" = "dry-run" ]; then
-            open_prs="$(gh pr list -R "$REPO" --base main --state open --limit 200 --json number --jq '[.[].number] | join(",")')"
-            result="dry-run"
-            detail="dry-run: open docs release PRs=[${open_prs:-none}]; no mutations performed"
-            exit 0
-          fi
-
-          mapfile -t rows < <(gh pr list -R "$REPO" --base main --state open --limit 200 --json number,headRefOid --jq '.[] | [.number, .headRefOid] | @tsv')
-          if [ "${#rows[@]}" -eq 0 ]; then
-            result="no-changes"; detail="no open task->main PRs on akaaka-docs"; exit 0
-          fi
-
-          stage_deadline=$((SECONDS + 2700))
-          merged_count=0; last_pr=""; last_sha=""
-          for row in "${rows[@]}"; do
-            n="${row%%$'\t'*}"; expect="${row##*$'\t'}"
-
-            # 僅計「目前實際具寫入權限」帳號的 APPROVED：association（MEMBER/COLLABORATOR）不保證現行權限，
-            # 須以 collaborators/{login}/permission 查得 write/admin 才算數；查詢失敗時 fail-closed 不計，
-            # 落實「具寫入權限者 APPROVED 才可合併」契約
-            approvals=0
-            while IFS= read -r reviewer; do
-              [ -z "$reviewer" ] && continue
-              perm="$(gh api "repos/$REPO/collaborators/$reviewer/permission" --jq '.permission_name // .permission' 2>/dev/null || true)"
-              case "$perm" in
-                admin|write) approvals=$((approvals+1)) ;;
-              esac
-            done < <(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not)) | .author.login] | unique | .[]')
-            if [ "${approvals:-0}" -eq 0 ]; then
-              detail+="PR #$n skipped (awaiting human approval); "
-              continue
-            fi
-
-            ok=1
-            while :; do
-              rollup="$(gh pr view "$n" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
-              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
-              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
-              mstate="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
-              if [ "${bad:-0}" -gt 0 ] || [ "$mstate" = "DIRTY" ]; then
-                detail+="PR #$n checks failed/conflicted; "; ok=0; break
-              fi
-              if [ "${pending:-0}" -eq 0 ] && { [ "$mstate" = "CLEAN" ] || [ "$mstate" = "HAS_HOOKS" ] || [ "$mstate" = "UNBLOCKED" ]; }; then
-                break
-              fi
-              if (( SECONDS >= stage_deadline )); then
-                detail+="PR #$n timed out waiting for checks; "; ok=0; break
-              fi
-              sleep 30
-            done
-            [ "$ok" -eq 1 ] || continue
-
-            # 回應遺失 ≠ 合併失敗：以 PR 狀態調和，已 MERGED 取回 merge commit 計入發版
-            merged="$(gh api -X PUT "repos/$REPO/pulls/$n/merge" -f merge_method=merge -f sha="$expect" --jq '.sha' 2>/dev/null)" || true
-            if [ -z "$merged" ]; then
-              pr_state="$(gh pr view "$n" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
-              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
-                merged="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
-                detail+="PR #$n merge response lost; recovered commit $merged; "
-              else
-                detail+="PR #$n merge rejected (head moved since snapshot); "; continue
-              fi
-            fi
-            last_pr="$n"; last_sha="$merged"; merged_count=$((merged_count+1))
-            detail+="merged approved PR #$n ($merged); "
-          done
-
-          if [ "$merged_count" -eq 0 ]; then
-            result="no-changes"; detail="nothing merged — ${detail:-no eligible PRs}"; exit 0
-          fi
-          pr="$last_pr"; sha="$last_sha"
-          result="released"; deploy="not-applicable"
-          detail="merged $merged_count approved docs PR(s); $detail"
           exit 0
 
+  # ------------------------------------------------------------------
+  # 報告：一律寄送（沉默不被視為正常）。含 Smoke 欄位、resumed 標記、
+  # awaiting manual remediation 與補償建議。dry-run 報告加 [DRY-RUN] 前綴。
+  # ------------------------------------------------------------------
   report:
     name: Email status report
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [release-iac, release-frontend, release-docs]
+    needs: [release-docs, release-iac, release-frontend]
     if: always()
     env:
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
     steps:
       - name: Send consolidated status report
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+          # needs outputs 一律經 env 傳遞——inline interpolation 會被 shell 展開，
+          # detail 含引號時造成注入或語法錯誤（Codex P1）
+          D_RESULT: ${{ needs.release-docs.outputs.result }}
+          D_DEPLOY: ${{ needs.release-docs.outputs.deploy }}
+          D_PR: ${{ needs.release-docs.outputs.pr }}
+          D_SHA: ${{ needs.release-docs.outputs.sha }}
+          D_DETAIL: ${{ needs.release-docs.outputs.detail }}
+          D_JOB: ${{ needs.release-docs.result }}
+          I_RESULT: ${{ needs.release-iac.outputs.result }}
+          I_DEPLOY: ${{ needs.release-iac.outputs.deploy }}
+          I_PR: ${{ needs.release-iac.outputs.pr }}
+          I_SHA: ${{ needs.release-iac.outputs.sha }}
+          I_DETAIL: ${{ needs.release-iac.outputs.detail }}
+          I_JOB: ${{ needs.release-iac.result }}
+          F_RESULT: ${{ needs.release-frontend.outputs.result }}
+          F_DEPLOY: ${{ needs.release-frontend.outputs.deploy }}
+          F_SMOKE: ${{ needs.release-frontend.outputs.smoke }}
+          F_PR: ${{ needs.release-frontend.outputs.pr }}
+          F_SHA: ${{ needs.release-frontend.outputs.sha }}
+          F_DETAIL: ${{ needs.release-frontend.outputs.detail }}
+          F_JOB: ${{ needs.release-frontend.result }}
         run: |
           set -euo pipefail
 
-          row() { # name result deploy pr sha needs_result detail
-            local name="$1" res="$2" dep="$3" pr="$4" sha="$5" nr="$6" det="$7"
+          row() { # name result deploy smoke pr sha job_result detail
+            local name="$1" res="$2" dep="$3" smk="$4" p="$5" s="$6" nr="$7" det="$8"
             if [ "$nr" = "skipped" ]; then
               res="skipped"
-              [ -z "$det" ] && det="not executed; upstream release failed"
+              [ -z "$det" ] && det="not executed; upstream release failed (strict order)"
             fi
-            printf '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td><td>%s</td></tr>\n' \
-              "$name" "$res" "$dep" "${pr:-—}" "${sha:0:12}${sha:+…}" "$det"
+            printf '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td><td>%s</td></tr>\n' \
+              "$name" "$res" "$dep" "${smk:--}" "${p:---}" "${s:0:12}${s:+…}" "$det"
           }
 
           rows=""
-          rows+="$(row "akaaka-iac"     "${{ needs.release-iac.outputs.result }}"     "${{ needs.release-iac.outputs.deploy }}"     "${{ needs.release-iac.outputs.pr }}"     "${{ needs.release-iac.outputs.sha }}"     "${{ needs.release-iac.result }}"     "${{ needs.release-iac.outputs.detail }}")"
-          rows+="$(row "akaaka-frontend" "${{ needs.release-frontend.outputs.result }}" "${{ needs.release-frontend.outputs.deploy }}" "${{ needs.release-frontend.outputs.pr }}" "${{ needs.release-frontend.outputs.sha }}" "${{ needs.release-frontend.result }}" "${{ needs.release-frontend.outputs.detail }}")"
-          rows+="$(row "akaaka-docs"     "${{ needs.release-docs.outputs.result }}"     "${{ needs.release-docs.outputs.deploy }}"     "${{ needs.release-docs.outputs.pr }}"     "${{ needs.release-docs.outputs.sha }}"     "${{ needs.release-docs.result }}"     "${{ needs.release-docs.outputs.detail }}")"
+          rows+="$(row "akaaka-docs"     "$D_RESULT" "$D_DEPLOY" ""        "$D_PR" "$D_SHA" "$D_JOB" "$D_DETAIL")"
+          rows+="$(row "akaaka-iac"      "$I_RESULT" "$I_DEPLOY" ""        "$I_PR" "$I_SHA" "$I_JOB" "$I_DETAIL")"
+          rows+="$(row "akaaka-frontend" "$F_RESULT" "$F_DEPLOY" "$F_SMOKE" "$F_PR" "$F_SHA" "$F_JOB" "$F_DETAIL")"
 
           overall="success"
-          # ADR-020 順序依賴：skipped 代表前一步部署失敗，故整體視為 failure
-          if [ "${{ needs.release-iac.result }}" = "failure" ] || \
-             [ "${{ needs.release-frontend.result }}" = "skipped" ] || \
-             [ "${{ needs.release-docs.result }}" = "skipped" ]; then
+          # 嚴格順序：任一 job 失敗或下游被 GitHub skip 即整體失敗
+          for r in "$D_JOB" "$I_JOB" "$F_JOB"; do
+            if [ "$r" = "failure" ] || [ "$r" = "skipped" ]; then overall="failure"; fi
+          done
+          for res in "$D_RESULT" "$I_RESULT" "$F_RESULT"; do
+            case "$res" in failed|aborted|blocked|skipped-upstream) overall="failure" ;; esac
+          done
+          for dep in "$I_DEPLOY" "$F_DEPLOY"; do
+            case "$dep" in failed|timeout-discovery|timeout-poll) overall="failure" ;; esac
+          done
+          # READY 但 smoke 失敗屬上線異常：整體判定必須反映，不得只出現在補償建議裡
+          if [ "$F_SMOKE" = "failed" ] && [ -n "$F_RESULT" ] && [ "$F_RESULT" != "dry-run" ]; then
             overall="failure"
           fi
-          for dep in "${{ needs.release-iac.outputs.deploy }}" "${{ needs.release-frontend.outputs.deploy }}"; do
-            case "$dep" in failed | timeout) overall="failure" ;; esac
-          done
           if [ "$overall" = "success" ] && \
-             [ "${{ needs.release-iac.outputs.result }}" != "released" ] && \
-             [ "${{ needs.release-frontend.outputs.result }}" != "released" ] && \
-             [ "${{ needs.release-docs.outputs.result }}" != "released" ]; then
+             [ "$D_RESULT" != "released" ] && \
+             [ "$I_RESULT" != "released" ] && \
+             [ "$F_RESULT" != "released" ]; then
             overall="nothing-to-ship"
           fi
+
+          # 補償建議：post-merge 失敗建議 revert 本次 merge 或加速 hotfix PR；
+          # terminal failure 標記 awaiting manual remediation 並建議 redeploy 原 merged SHA
+          comp_added=0
+          comp="<p style='color:#8a6d3b;font-size:13px'><b>Recommended actions</b><br/>"
+          add_comp() { comp+="$1<br/>"; comp_added=1; }
+          if [ "$I_RESULT" = "failed" ] || [ "$F_RESULT" = "failed" ]; then
+            add_comp "- Stage failed after merge(s): revert this run's merge commit or expedite a hotfix PR."
+          fi
+          case "$I_DEPLOY" in
+            failed) add_comp "- akaaka-iac deployment terminal failure (SHA <code>$I_SHA</code>): awaiting manual remediation — rerun the failed iac-cd run or redeploy exactly this SHA; alternatively revert/hotfix." ;;
+            timeout-discovery|timeout-poll) add_comp "- akaaka-iac deployment timed out (SHA <code>$I_SHA</code>): rerun the orchestrator to resume watching with fresh bounded windows." ;;
+          esac
+          case "$F_DEPLOY" in
+            failed) add_comp "- akaaka-frontend Vercel deployment terminal failure (SHA <code>$F_SHA</code>): awaiting manual remediation — trigger a Vercel redeploy of exactly this SHA; alternatively revert/hotfix." ;;
+            timeout-discovery|timeout-poll) add_comp "- akaaka-frontend deployment timed out (SHA <code>$F_SHA</code>): rerun the orchestrator to resume watching with fresh bounded windows." ;;
+          esac
+          if [ "$F_SMOKE" = "failed" ]; then
+            add_comp "- akaaka-frontend smoke check failed on a READY deployment (SHA <code>$F_SHA</code>): rerunning the orchestrator re-runs only the smoke check; fix forward via hotfix if it persists."
+          fi
+          comp+="</p>"
+          if [ "$comp_added" -eq 0 ]; then comp=""; fi
 
           mode_tag=""
           if [ "$RELEASE_MODE" = "dry-run" ]; then mode_tag="[DRY-RUN] "; fi
@@ -567,10 +1120,11 @@ jobs:
           run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           html="<html><body style='font-family:sans-serif'>"
           html+="<h2>${mode_tag}AkaAka Weekly Production Release — ${overall}</h2>"
-          html+="<p>Scheduled Friday 08:19 Asia/Taipei release. Run: <a href='${run_url}'>${run_url}</a></p>"
+          html+="<p>Scheduled Friday 08:19 Asia/Taipei release (order: docs &rarr; iac &rarr; frontend). Run: <a href='${run_url}'>${run_url}</a></p>"
           html+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:14px'>"
-          html+="<tr style='background:#f0f0f0'><th>Repo</th><th>Result</th><th>Deploy</th><th>PR</th><th>Merged SHA</th><th>Detail</th></tr>"
+          html+="<tr style='background:#f0f0f0'><th>Repo</th><th>Result</th><th>Deploy</th><th>Smoke</th><th>PR</th><th>Merged SHA</th><th>Detail</th></tr>"
           html+="${rows}</table>"
+          html+="$comp"
           html+="<p style='color:#666;font-size:12px'>Contract: akaaka-docs/docs/spec/platform/001-vercel-deployment-spec.md · Decision: ADR-020</p>"
           html+="</body></html>"
 
@@ -592,21 +1146,46 @@ jobs:
           {
             echo "# Weekly Production Release Report — ${overall}"
             echo ""
-            echo "| Repo | Result | Deploy | PR | SHA | Detail |"
-            echo "|---|---|---|---|---|---|"
+            echo "| Repo | Result | Deploy | Smoke | PR | SHA | Detail |"
+            echo "|---|---|---|---|---|---|---|"
             printf '%s' "$rows" | sed 's/<td[^>]*>/| /g; s/<th[^>]*>/| /g; s/<tr[^>]*>//; s/<\/tr>//'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Persist release state checkpoint
+      - name: Persist release state checkpoint (schema v2)
         # dry-run 為唯讀規劃，不得建立或覆寫 checkpoint（否則會清掉待 resume 的失敗部署紀錄）
         if: ${{ always() && env.RELEASE_MODE != 'dry-run' }}
+        env:
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+          # needs outputs 一律經 env 傳遞，杜絕 shell 注入（expands/consumptions 為含引號 JSON）
+          I_RESULT: ${{ needs.release-iac.outputs.result }}
+          I_PR: ${{ needs.release-iac.outputs.pr }}
+          I_SHA: ${{ needs.release-iac.outputs.sha }}
+          I_DEPLOY: ${{ needs.release-iac.outputs.deploy }}
+          I_RUN_ID: ${{ needs.release-iac.outputs.run_id }}
+          I_EXP: ${{ needs.release-iac.outputs.expands }}
+          I_PEND: ${{ needs.release-iac.outputs.pending_expands }}
+          F_RESULT: ${{ needs.release-frontend.outputs.result }}
+          F_PR: ${{ needs.release-frontend.outputs.pr }}
+          F_SHA: ${{ needs.release-frontend.outputs.sha }}
+          F_DEPLOY: ${{ needs.release-frontend.outputs.deploy }}
+          F_SMOKE: ${{ needs.release-frontend.outputs.smoke }}
+          F_UID: ${{ needs.release-frontend.outputs.vercel_uid }}
+          F_CONS: ${{ needs.release-frontend.outputs.consumptions }}
+          F_PEND: ${{ needs.release-frontend.outputs.pending_consumptions }}
+          D_RESULT: ${{ needs.release-docs.outputs.result }}
+          D_PR: ${{ needs.release-docs.outputs.pr }}
+          D_SHA: ${{ needs.release-docs.outputs.sha }}
+          D_JOB: ${{ needs.release-docs.result }}
+          I_JOB: ${{ needs.release-iac.result }}
+          F_JOB: ${{ needs.release-frontend.result }}
         run: |
           set -uo pipefail
           REPO="${GITHUB_REPOSITORY}"
           BRANCH="$RELEASE_STATE_BRANCH"
           # 讀取既有 checkpoint：必須區分「檔案尚不存在（HTTP 404，可正常 bootstrap）」與
           # 「API 錯誤／內容無法取得（狀態不可靠）」。後者直接跳過寫入——若以本次資料覆寫，
-          # 可能清掉待 resume 的失敗部署紀錄，讓未套用的 production migration 永久漏部署
+          # 可能清掉待 resume 的失敗部署紀錄或 expands/consumptions ledger，讓未套用的
+          # production migration 永久漏部署、contract-step evidence 被意外洗掉
           prev_err="$(mktemp)"
           prev_b64="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>"$prev_err")" || true
           if [ -s "$prev_err" ] && ! grep -q 'HTTP 404' "$prev_err"; then
@@ -617,20 +1196,115 @@ jobs:
           rm -f "$prev_err"
           prev_json="$(printf '%s' "$prev_b64" | base64 -d 2>/dev/null || true)"
 
-          state="$(jq -n \
-            --arg ir "${{ needs.release-iac.outputs.result }}" --arg isha "${{ needs.release-iac.outputs.sha }}" --arg idep "${{ needs.release-iac.outputs.deploy }}" \
-            --arg fr "${{ needs.release-frontend.outputs.result }}" --arg fsha "${{ needs.release-frontend.outputs.sha }}" --arg fdep "${{ needs.release-frontend.outputs.deploy }}" \
-            --arg dr "${{ needs.release-docs.outputs.result }}" --arg dsha "${{ needs.release-docs.outputs.sha }}" --arg ddep "${{ needs.release-docs.outputs.deploy }}" \
-            '{iac:{result:$ir,sha:$isha,deploy:$idep}, frontend:{result:$fr,sha:$fsha,deploy:$fdep}, docs:{result:$dr,sha:$dsha,deploy:$ddep}}')"
+          # 舊 schema（v1）正規化到 v2：補預設欄位、ledger 自零開始累積
+          prev_norm="$(printf '%s' "$prev_json" | jq -c '
+            if type == "object" and .version == 2 then .
+            elif type == "object" then {
+              version: 2,
+              generated_at: "",
+              repos: {
+                iac: ((.iac // {}) + {smoke:"",class:"",run_id:"",pending_expands:[]}),
+                frontend: ((.frontend // {}) + {smoke:"",class:"",vercel_uid:"",pending_consumptions:[]}),
+                docs: ((.docs // {}) + {smoke:"",class:""})
+              },
+              expands: [],
+              consumptions: [],
+              last_full_release_at: ""
+            } else empty end')"
 
-          # 無新部署事實的 stage（result 空／aborted，或本次沒有合併 SHA：暫時性 API 失敗、dry-run、no-changes）
-          # 不得覆寫 checkpoint——空資料會清掉待 resume 的失敗紀錄，後續 run 誤判無可續行部署而永久漏部署
-          if printf '%s' "$prev_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
-            state="$(printf '%s' "$state" | jq -c --argjson prev "$prev_json" '
-              .iac = (if ((.iac.result // "") == "" or .iac.result == "aborted" or (.iac.sha // "") == "") then ($prev.iac // .iac) else .iac end) |
-              .frontend = (if ((.frontend.result // "") == "" or .frontend.result == "aborted" or (.frontend.sha // "") == "") then ($prev.frontend // .frontend) else .frontend end) |
-              .docs = (if ((.docs.result // "") == "" or .docs.result == "aborted" or (.docs.sha // "") == "") then ($prev.docs // .docs) else .docs end)
-            ')"
+          # class 判定：本 run 有 merge 且結論未完全驗證 → post-merge-failed；
+          # 未達 merge 即停止 → pre-merge-skipped（stage 腳本內已標記）
+          iac_class=""
+          if [ "$I_RESULT" = "released" ]; then
+            case "$I_DEPLOY" in
+              success|no-deploy) iac_class="" ;;
+              *) iac_class="post-merge-failed" ;;
+            esac
+          fi
+          fe_class=""
+          if [ "$F_RESULT" = "released" ]; then
+            if [ "$F_DEPLOY" = "success" ] && [ "$F_SMOKE" = "passed" ]; then
+              fe_class=""
+            else
+              fe_class="post-merge-failed"
+            fi
+          fi
+          docs_class=""
+          if [ "$D_RESULT" = "released" ]; then docs_class=""; fi
+
+          state="$(jq -n \
+            --argjson prev "${prev_norm:-null}" \
+            --arg ir "$I_RESULT" --arg ipr "$I_PR" \
+            --arg isha "$I_SHA" --arg idep "$I_DEPLOY" \
+            --arg icls "$iac_class" --arg irun "$I_RUN_ID" \
+            --arg iexp "$I_EXP" --arg ipend "$I_PEND" \
+            --arg fr "$F_RESULT" --arg fpr "$F_PR" \
+            --arg fsha "$F_SHA" --arg fdep "$F_DEPLOY" \
+            --arg fsmoke "$F_SMOKE" --arg fcls "$fe_class" \
+            --arg fuuid "$F_UID" \
+            --arg fcons "$F_CONS" --arg fpend "$F_PEND" \
+            --arg dr "$D_RESULT" --arg dpr "$D_PR" \
+            --arg dsha "$D_SHA" --arg dcls "$docs_class" \
+            --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '
+            def blank_iac: {result:"",pr:null,sha:"",deploy:"",smoke:"",class:"",run_id:"",detail:""};
+            def blank_fe:  {result:"",pr:null,sha:"",deploy:"",smoke:"",class:"",vercel_uid:"",detail:""};
+            def blank_doc: {result:"",pr:null,sha:"",deploy:"not-applicable",smoke:"",class:"",detail:""};
+            # 本 run 未完成首次 CAS merge（skipped/aborted/pre-merge 失敗）時保留既有條目，
+            # 以免清掉待 resume 的失敗紀錄；僅 released（含 post-merge-failed）覆寫
+            def keep_prev($p; $cur):
+              if (($cur.result // "") == "released") then $cur
+              elif (($p.result // "") != "") then
+                ($p + {class: (if (($p.class // "") == "") then "pre-merge-skipped" else ($p.class // "") end)})
+              else $cur end;
+            {
+              version: 2,
+              generated_at: $now,
+              repos: {
+                iac: (keep_prev(($prev.repos.iac // blank_iac);
+                        {result:$ir, pr:(if $ipr=="" then null else ($ipr|tonumber? // $ipr) end), sha:$isha,
+                         deploy:$idep, smoke:"", class:$icls, run_id:$irun, detail:""})),
+                frontend: (keep_prev(($prev.repos.frontend // blank_fe);
+                        {result:$fr, pr:(if $fpr=="" then null else ($fpr|tonumber? // $fpr) end), sha:$fsha,
+                         deploy:$fdep, smoke:$fsmoke, class:$fcls, vercel_uid:$fuuid, detail:""})),
+                docs: (keep_prev(($prev.repos.docs // blank_doc);
+                        {result:$dr, pr:(if $dpr=="" then null else ($dpr|tonumber? // $dpr) end), sha:$dsha,
+                         deploy:"not-applicable", smoke:"", class:$dcls, detail:""}))
+              },
+              expands: (
+                (($prev.expands // []) +
+                 (if ($iexp == "" or $iexp == "[]") then [] else ($iexp | fromjson) end))
+                | sort_by(.shipped_at) | group_by(.pr) | map(.[-1])
+              ),
+              consumptions: (
+                (($prev.consumptions // []) +
+                 (if ($fcons == "" or $fcons == "[]") then [] else ($fcons | fromjson) end))
+                | unique_by(.expand_pr, .task_pr, .frontend_sha)
+              ),
+              last_full_release_at: (
+                if (($ir == "released" or $ir == "no-changes") and ($idep == "success" or $idep == "no-deploy"))
+                   and (($fr == "released" or $fr == "no-changes") and $fdep == "success" and $fsmoke == "passed")
+                   and ($dr == "released" or $dr == "no-changes")
+                then $now else (($prev.last_full_release_at // "")) end
+              )
+            }
+            # pending evidence：合併後部署未收斂時暫存；resume 成功的 run 由 stage 直接
+            # 輸出為正式 ledger entry，此處同步清空；未收斂則以本 run 最新狀態覆寫
+            | .repos.iac.pending_expands = (
+                if ($ir == "released" and ($idep == "success" or $idep == "no-deploy")) then []
+                elif ($ir == "released" and $ipend != "" and $ipend != "[]") then ($ipend | fromjson)
+                elif (($prev.repos.iac.pending_expands // []) != []) then ($prev.repos.iac.pending_expands)
+                else ($ipend | if . == "" or . == "[]" then [] else fromjson end) end)
+              | .repos.frontend.pending_consumptions = (
+                if ($fr == "released" and $fdep == "success" and $fsmoke == "passed") then []
+                elif ($fr == "released" and $fpend != "" and $fpend != "[]") then ($fpend | fromjson)
+                elif (($prev.repos.frontend.pending_consumptions // []) != []) then ($prev.repos.frontend.pending_consumptions)
+                else ($fpend | if . == "" or . == "[]" then [] else fromjson end) end)
+          ')"
+
+          if ! printf '%s' "$state" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            echo "::warning::computed state invalid; skipping persist"
+            exit 0
           fi
 
           if ! gh api "repos/$REPO/branches/$BRANCH" >/dev/null 2>&1; then
@@ -643,7 +1317,7 @@ jobs:
             '{message:$msg, content:$c, branch:$b} + (if $s != "" then {sha:$s} else {} end)')"
 
           if printf '%s' "$payload" | gh api -X PUT "repos/$REPO/contents/state.json" --input - >/dev/null 2>&1; then
-            echo "release state persisted to $BRANCH/state.json"
+            echo "release state persisted to $BRANCH/state.json (schema v2)"
           else
             echo "::warning::failed to persist release state; resume semantics degrade on next rerun"
           fi
