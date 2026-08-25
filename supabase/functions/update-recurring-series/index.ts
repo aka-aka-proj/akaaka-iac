@@ -128,8 +128,12 @@ Deno.serve(async (req: Request) => {
     }
 
     // Derive is_venue_hosted from caller's profile
-    const { data: profile } = await serviceClient.from('profiles').select('role_status').eq('id', user.id).single()
-    const derivedVenueHosted = profile?.role_status === 'venue_approved'
+    const { data: profile, error: profileError } = await serviceClient.from('profiles').select('role_status').eq('id', user.id).single()
+    if (profileError || !profile) {
+      console.error('Failed to fetch caller profile for venue flag', { userId: user.id, error: profileError })
+      return errorResponse('internal_error', 'Failed to verify venue status', 500)
+    }
+    const derivedVenueHosted = profile.role_status === 'venue_approved'
 
     // Filter scope members
     const scopeMembers = filterScopeMembers(parent as SeriesMemberRow, (children ?? []) as SeriesMemberRow[], scope, target.start_time)
@@ -165,17 +169,23 @@ Deno.serve(async (req: Request) => {
       // Deadline
       if (deadlineAction !== 'keep') {
         const nextDeadline = computeNextDeadline(member.start_time, deadlineAction, deadlineParams)
-        if (nextDeadline !== member.registration_deadline) {
+        const currentMs = member.registration_deadline ? new Date(member.registration_deadline).getTime() : null
+        const nextMs = nextDeadline ? new Date(nextDeadline).getTime() : null
+        if (currentMs !== nextMs) {
           updateObject.registration_deadline = nextDeadline ?? null
         }
       }
 
-      // Skip if nothing changed
+      // Skip if nothing changed or member is locked
       if (Object.keys(updateObject).length === 0) continue
 
+      // Re-check lock predicate at write time to handle stale data
+      // (member may have started between fetch and update).
       const { error: updateError } = await serviceClient.from('events')
         .update(updateObject)
         .eq('id', member.id)
+        .not('lifecycle_status', 'in', '("completed","archived","cancelled")')
+        .or(`lifecycle_status.eq.draft,start_time.gt.${nowIso}`)
 
       if (updateError) {
         failedCount += 1
@@ -199,6 +209,7 @@ Deno.serve(async (req: Request) => {
             .eq('id', parentId)
           if (ruleError) {
             console.error('Failed to sync deadline template to parent', { parentId, error: ruleError })
+            failedCount += 1
           }
         }
       }
