@@ -1,4 +1,4 @@
--- Migration: 20260829120000_add_event_share_token.sql
+-- Migration: 20260830120000_add_event_share_token.sql
 -- 私人活動分享連結（ADR-022；依 agent 安全審查修訂為獨立表設計）
 -- 1. 建立 event_share_tokens 表：RLS 啟用且無 policy（deny-by-default）、
 --    撤銷一般角色全部 table privilege——token 不得存於 events 欄位，
