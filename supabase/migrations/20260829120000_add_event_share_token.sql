@@ -8,6 +8,13 @@
 -- 4. hygiene trigger：活動離開 private 狀態時刪除 token 列
 
 -- ============================================================
+-- Step 0: Token entropy source
+-- gen_random_bytes 由 pgcrypto 提供；顯式建立（冪等）使乾淨資料庫
+-- 不依賴主機預設，與 search_path 的 extensions 對齊。
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+-- ============================================================
 -- Step 1: Token table — direct access fully denied
 -- ============================================================
 CREATE TABLE IF NOT EXISTS public.event_share_tokens (
@@ -44,6 +51,8 @@ BEGIN
   -- re-evaluated after any conflicting transaction commits, so a token can
   -- never be minted for an event that just left the published+private state.
   SELECT e.creator_id = auth.uid()
+     AND e.lifecycle_status <> 'draft'
+     AND e.publication_status = 'published'
      AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
     INTO v_is_shareable
   FROM public.events e
@@ -78,6 +87,8 @@ DECLARE
 BEGIN
   -- Same serialization contract as ensure_event_share_token.
   SELECT e.creator_id = auth.uid()
+     AND e.lifecycle_status <> 'draft'
+     AND e.publication_status = 'published'
      AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
     INTO v_is_shareable
   FROM public.events e
