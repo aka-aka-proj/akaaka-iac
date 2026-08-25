@@ -38,8 +38,9 @@ SELECT ok(
   'scheduling lock references the allowed-diff path for registration_deadline_offset_minutes'
 );
 
--- Setup: create a minimal profile and two events (parent + child).
--- Bypass FK checks for test fixtures (auth.users lookup not needed in pgTAP).
+-- Setup: create minimal profile and two events (parent + child with series_id).
+-- Bypass FK checks for test fixtures (auth.users lookup not needed in pgTAP),
+-- then restore origin so the scheduling-lock trigger fires on updates.
 SET session_replication_role = replica;
 
 INSERT INTO public.profiles (id) VALUES ('00000000-0000-0000-0000-000000000001'::uuid);
@@ -63,6 +64,8 @@ INSERT INTO public.events (
   'Child event', '2026-09-07T12:00:00Z', 'Online',
   'draft', '{}'::text[], 'free', '00000000-0000-0000-0000-000000000010'::uuid
 );
+
+SET session_replication_role = origin;
 
 SELECT throws_ok(
   $$UPDATE public.events SET start_time = '2026-09-07T14:00:00Z' WHERE id = '00000000-0000-0000-0000-000000000011'::uuid$$,
