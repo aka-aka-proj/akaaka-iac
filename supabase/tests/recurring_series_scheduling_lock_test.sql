@@ -41,6 +41,9 @@ SELECT ok(
 -- Prepare a minimal profile and two events (parent + child with series_id).
 -- Run inside a subtransaction so we can catch exceptions.
 
+-- Bypass FK checks for test fixtures (auth.users lookup not needed in pgTAP).
+SET session_replication_role = replica;
+
 INSERT INTO public.profiles (id) VALUES ('00000000-0000-0000-0000-000000000001'::uuid);
 
 INSERT INTO public.events (
