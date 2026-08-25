@@ -221,8 +221,10 @@ jobs:
           # 監看 main 上的 iac-cd.yml run 直到結束
           deadline=$((SECONDS + 2400))
           while :; do
-            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --limit 10 --json databaseId,headSha,status,conclusion)"
-            run="$(printf '%s' "$run_json" | jq -r "[.[] | select(.headSha == \"$sha\")][0].databaseId // \"\"")"
+            # 以 --commit 精確篩選該 merge SHA 的 runs：--limit 只取「最近 N 筆」，
+            # 較新的無關 runs 會把待 resume 的舊 run 擠出視窗，永遠找不到 operator 重跑的成功 attempt
+            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --commit "$sha" --limit 10 --json databaseId,status,conclusion)"
+            run="$(printf '%s' "$run_json" | jq -r '.[0].databaseId // ""')"
             if [ -n "$run" ]; then
               st="$(gh run view "$run" -R "$REPO" --json status,conclusion)"
               status="$(printf '%s' "$st" | jq -r '.status')"; conc="$(printf '%s' "$st" | jq -r '.conclusion')"
@@ -244,6 +246,17 @@ jobs:
             fi
             sleep 30
           done
+
+          # 部署失敗／逾時必須讓 stage 失敗（exit 1），GitHub Actions 才會 skip 下游
+          # release-frontend／release-docs，維持 IaC -> Frontend -> Docs 發佈順序；
+          # report 與 checkpoint persist 於 always() 下照常執行，結論仍完整留存供 resume
+          case "$deploy" in
+            failed|timeout)
+              echo "::error::iac production release did not succeed (deploy=$deploy): $detail"
+              exit 1 ;;
+            *)
+              exit 0 ;;
+          esac
 
   release-frontend:
     name: Release akaaka-frontend
