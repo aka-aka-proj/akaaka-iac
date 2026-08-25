@@ -588,8 +588,10 @@ jobs:
               fi
             fi
             if [ -z "$found_run" ]; then
-              run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --limit 20 --json databaseId,headSha,status,conclusion)"
-              found_run="$(printf '%s' "$run_json" | jq -r "[.[] | select(.headSha == \"$sha\")][0].databaseId // \"\"")"
+              # 以 commit SHA 伺服器端篩選：較新 run 超過 limit 後仍能找到目標
+              # （含 operator 的 rerun attempt）（a20a0e1 同源修復）
+              run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --commit "$sha" --limit 30 --json databaseId,status,conclusion)"
+              found_run="$(printf '%s' "$run_json" | jq -r '[.[]][0].databaseId // ""')"
             fi
             if [ -n "$found_run" ]; then
               run_id_out="$found_run"
