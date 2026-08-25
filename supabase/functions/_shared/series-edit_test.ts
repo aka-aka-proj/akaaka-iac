@@ -192,6 +192,11 @@ Deno.test('validateEditableFields accepts valid fields', () => {
   assertEquals(validateEditableFields({ title: 'A', description: 'B' }), null)
 })
 
+Deno.test('validateEditableFields rejects unknown fields', () => {
+  assertEquals(validateEditableFields({ title: 'A', creator_id: 'x' }), 'unknown field "creator_id" is not allowed in batch edits')
+  assertEquals(validateEditableFields({ titel: 'A' }), 'unknown field "titel" is not allowed in batch edits')
+})
+
 Deno.test('validateEditableFields accepts undefined fields', () => {
   assertEquals(validateEditableFields(undefined), null)
 })

@@ -31,11 +31,18 @@ DECLARE
   _belongs_to_series BOOLEAN;
   _allowed_diff BOOLEAN;
 BEGIN
-  _belongs_to_series := OLD.series_id IS NOT NULL
+  _belongs_to_series := (OLD.series_id IS NOT NULL)
+    OR (NEW.series_id IS NOT NULL)
     OR EXISTS (SELECT 1 FROM public.events WHERE series_id = OLD.id);
 
   IF NOT _belongs_to_series THEN
     RETURN NEW;
+  END IF;
+
+  -- Also prevent changing series membership (which would allow bypassing the lock).
+  IF NEW.series_id IS DISTINCT FROM OLD.series_id THEN
+    RAISE EXCEPTION 'series member series_id may not change'
+      USING ERRCODE = 'P0001';
   END IF;
 
   IF NEW.start_time IS DISTINCT FROM OLD.start_time THEN
