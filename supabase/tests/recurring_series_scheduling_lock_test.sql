@@ -38,9 +38,7 @@ SELECT ok(
   'scheduling lock references the allowed-diff path for registration_deadline_offset_minutes'
 );
 
--- Prepare a minimal profile and two events (parent + child with series_id).
--- Run inside a subtransaction so we can catch exceptions.
-
+-- Setup: create a minimal profile and two events (parent + child).
 -- Bypass FK checks for test fixtures (auth.users lookup not needed in pgTAP).
 SET session_replication_role = replica;
 
@@ -66,46 +64,22 @@ INSERT INTO public.events (
   'draft', '{}'::text[], 'free', '00000000-0000-0000-0000-000000000010'::uuid
 );
 
-SELECT lives_ok(
-  $$BEGIN
-    UPDATE public.events
-    SET start_time = '2026-09-07T14:00:00Z'
-    WHERE id = '00000000-0000-0000-0000-000000000011'::uuid;
-    RAISE EXCEPTION 'expected trigger to reject series child start_time change';
-  EXCEPTION WHEN OTHERS THEN
-    IF SQLERRM LIKE 'series member start_time may not change' THEN
-      -- expected, pass
-    ELSE
-      RAISE;
-    END IF;
-  END$$,
+SELECT throws_ok(
+  $$UPDATE public.events SET start_time = '2026-09-07T14:00:00Z' WHERE id = '00000000-0000-0000-0000-000000000011'::uuid$$,
+  'P0001',
+  'series member start_time may not change',
   'series child start_time change is rejected by the scheduling lock trigger'
 );
 
-SELECT lives_ok(
-  $$BEGIN
-    UPDATE public.events
-    SET recurrence_rule = '{"frequency":"monthly","interval":1,"count":4,"timezone":"Asia/Taipei"}'::jsonb
-    WHERE id = '00000000-0000-0000-0000-000000000011'::uuid;
-    RAISE EXCEPTION 'expected trigger to reject series child recurrence_rule semantic change';
-  EXCEPTION WHEN OTHERS THEN
-    IF SQLERRM LIKE 'series member recurrence_rule may only change its registration_deadline_offset_minutes attribute' THEN
-      -- expected, pass
-    ELSE
-      RAISE;
-    END IF;
-  END$$,
+SELECT throws_ok(
+  $$UPDATE public.events SET recurrence_rule = '{"frequency":"monthly","interval":1,"count":4,"timezone":"Asia/Taipei"}'::jsonb WHERE id = '00000000-0000-0000-0000-000000000011'::uuid$$,
+  'P0001',
+  'series member recurrence_rule may only change its registration_deadline_offset_minutes attribute',
   'series child recurrence_rule semantic change is rejected by the scheduling lock trigger'
 );
 
 SELECT lives_ok(
-  $$BEGIN
-    UPDATE public.events
-    SET recurrence_rule = '{"frequency":"weekly","interval":1,"days":["Mon"],"count":4,"timezone":"Asia/Taipei","registration_deadline_offset_minutes":1440}'::jsonb
-    WHERE id = '00000000-0000-0000-0000-000000000011'::uuid;
-  EXCEPTION WHEN OTHERS THEN
-    RAISE;
-  END$$,
+  $$UPDATE public.events SET recurrence_rule = '{"frequency":"weekly","interval":1,"days":["Mon"],"count":4,"timezone":"Asia/Taipei","registration_deadline_offset_minutes":1440}'::jsonb WHERE id = '00000000-0000-0000-0000-000000000011'::uuid$$,
   'recurrence_rule change limited to registration_deadline_offset_minutes is accepted'
 );
 
