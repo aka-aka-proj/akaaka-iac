@@ -8,6 +8,13 @@
 -- Contracts: akaaka-docs docs/spec/api/004-web-push-subscription-hygiene.md,
 -- docs/spec/database/001-akaaka-supabase-schema.md, ADR-021.
 
+-- 0) Defensive boundary: the delivery outbox must never cascade-delete its
+-- audit/idempotency metadata when subscriptions disappear. Older schema
+-- documentation described a CASCADE foreign key; guarantee its absence
+-- before the dedupe step below removes rows.
+ALTER TABLE public.notification_push_deliveries
+  DROP CONSTRAINT IF EXISTS notification_push_deliveries_push_subscription_id_fkey;
+
 -- 1) Widen the delivery status vocabulary with the terminal `cancelled`
 -- state: the target subscription was removed by scheduled cleanup or its
 -- endpoint moved to another profile, so the delivery must never be sent.
@@ -128,12 +135,27 @@ BEGIN
     RAISE EXCEPTION 'endpoint_conflict';
   END IF;
 
+  -- Possession proven. Defer the move while an active send is in flight:
+  -- a worker holding an unexpired processing lease is mid "owner check ->
+  -- provider send", and racing the ownership change here would let that
+  -- send land new-owner keys onto old-owner work. Deferral makes move and
+  -- send mutually exclusive at the lease boundary; clients retry naturally.
+  IF EXISTS (
+    SELECT 1
+      FROM public.notification_push_deliveries d
+     WHERE d.push_subscription_id = v_existing.id
+       AND d.status = 'processing'
+       AND d.claimed_at >= timezone('utc', now()) - interval '5 minutes'
+  ) THEN
+    RAISE EXCEPTION 'endpoint_move_deferred';
+  END IF;
+
   UPDATE public.push_subscriptions
      SET profile_id = v_profile_id,
          user_agent = p_user_agent,
          updated_at = timezone('utc', now())
    WHERE id = v_existing.id
-   RETURNING id INTO v_subscription_id;
+  RETURNING id INTO v_subscription_id;
 
   -- Quarantine outstanding deliveries of the previous owner inside the same
   -- transaction. Already-terminal rows stay untouched as audit history.
@@ -155,7 +177,6 @@ GRANT EXECUTE ON FUNCTION public.subscribe_push_subscription(TEXT, TEXT, TEXT, T
 -- through the controlled RPC above; direct INSERT/UPDATE would bypass the
 -- possession-proof and move-quarantine semantics. Self-service unsubscribe
 -- stays a plain RLS-scoped DELETE. Service-side workers keep full access.
-REVOKE INSERT, UPDATE ON public.push_subscriptions FROM authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.push_subscriptions TO service_role;
 GRANT SELECT ON public.notifications TO service_role;
 

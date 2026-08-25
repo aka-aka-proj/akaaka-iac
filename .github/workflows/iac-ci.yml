@@ -130,15 +130,14 @@ jobs:
         if: matrix.target.name == 'migrations'
         run: |
           expand="supabase/migrations/20260825000000_push_subscription_hygiene.sql"
-          contract="supabase/migrations/20260826000000_push_subscription_endpoint_unique_contract_step.sql"
 
           for required in \
             "notification_push_deliveries_status_check" \
             "'cancelled'" \
-            "REVOKE INSERT, UPDATE ON public.push_subscriptions FROM authenticated" \
             "GRANT SELECT, INSERT, UPDATE, DELETE ON public.push_subscriptions TO service_role" \
             "GRANT SELECT ON public.notifications TO service_role" \
             "endpoint_conflict" \
+            "'endpoint_move_deferred'" \
             "'endpoint_moved'" \
             "'subscription_missing'" \
             "idx_notification_push_deliveries_subscription_sent" \
@@ -153,16 +152,17 @@ jobs:
             fi
           done
 
-          for required in \
-            "push_subscriptions_endpoint_unique UNIQUE (endpoint)" ; do
-            if ! grep -Fq "$required" "$contract"; then
-              echo "Missing contract-step hygiene boundary: $required"
-              exit 1
-            fi
-          done
+          # Expand-only purity (api/004 §Rollout ordering step 1): no tightening
+          # constraints or privilege revocations may ship in this migration; the
+          # contract-step migration is a separate follow-up PR gated by weekly
+          # release consumer evidence.
+          if grep -Eq "push_subscriptions_endpoint_unique|REVOKE INSERT, UPDATE ON public.push_subscriptions|NOT VALID.*push_subscriptions" "$expand"; then
+            echo "Expand-only hygiene migration contains a tightening change"
+            exit 1
+          fi
 
           for forbidden in pg_net http; do
-            if grep -Fq "$forbidden" "$expand" "$contract"; then
+            if grep -Fq "$forbidden" "$expand"; then
               echo "Forbidden external-network pattern in hygiene migrations: $forbidden"
               exit 1
             fi

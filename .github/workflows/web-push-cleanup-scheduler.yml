@@ -1,5 +1,10 @@
 name: Web Push subscription cleanup scheduler
 
+# GitHub registers workflow_dispatch/schedule triggers only when the workflow
+# file exists on the default branch (main). Until the first weekly-release
+# promotion carries this file to main, neither production cron nor preview
+# staging smoke can be dispatched — by design; see api/004 §Scheduler.
+
 on:
   schedule:
     - cron: "17 18 * * *"

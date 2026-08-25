@@ -1,17 +1,20 @@
 BEGIN;
 
-SELECT plan(40);
+SELECT plan(45);
 
 -- Structural contracts -------------------------------------------------------
 
+-- Expand-only rollout (api/004 §Rollout ordering): the tightening global
+-- unique constraint belongs to the separate contract-step migration and must
+-- NOT exist yet; its absence is part of this phase's contract.
 SELECT ok(
-  EXISTS (
+  NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conrelid = 'public.push_subscriptions'::regclass
       AND conname = 'push_subscriptions_endpoint_unique'
       AND contype = 'u'
   ),
-  'endpoint has a global single-column unique constraint'
+  'global endpoint unique is deferred to the contract step'
 );
 
 SELECT ok(
@@ -84,9 +87,10 @@ SELECT ok(
 );
 
 SELECT ok(
-  NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'INSERT')
-    AND NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE'),
-  'browser clients cannot write subscription rows outside the controlled RPC'
+  has_table_privilege('authenticated', 'public.push_subscriptions', 'INSERT')
+    AND has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE')
+    AND has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
+  'expand window keeps legacy client writes; contract-step will revoke them'
 );
 
 SELECT ok(
@@ -109,7 +113,8 @@ FROM (
     ('00000000-0000-4000-8000-000000000301'::uuid),
     ('00000000-0000-4000-8000-000000000302'::uuid),
     ('00000000-0000-4000-8000-000000000303'::uuid),
-    ('00000000-0000-4000-8000-000000000304'::uuid)
+    ('00000000-0000-4000-8000-000000000304'::uuid),
+    ('00000000-0000-4000-8000-000000000305'::uuid)
 ) AS users(id);
 
 INSERT INTO public.profiles (id, display_name, external_social_links)
@@ -233,7 +238,13 @@ SELECT is(
   'in-place rotation stores the refreshed key material'
 );
 
-SELECT throws_ok(
+-- Expand-phase transition contract (api/004 §Rollout ordering step 1):
+-- legacy clients keep working unchanged until the contract-step migration
+-- revokes direct writes. These assertions pin that transitional allowance —
+-- silently breaking old bundles here would be a rollout regression.
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000301', true);
+SELECT lives_ok(
   $$INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth)
     VALUES (
       '00000000-0000-4000-8000-000000000301',
@@ -241,21 +252,19 @@ SELECT throws_ok(
       'p256dh-x',
       'auth-x'
     )$$,
-  '42501',
-  NULL,
-  'direct client INSERT is revoked outside the controlled RPC'
+  'legacy direct client INSERT still works during the expand window'
 );
 
-SELECT throws_ok(
+SELECT lives_ok(
   format(
     'UPDATE public.push_subscriptions SET user_agent = %L WHERE id = %L',
-    'tampered',
+    'ua-legacy',
     :'hyg_original_id'
   ),
-  '42501',
-  NULL,
-  'direct client UPDATE is revoked outside the controlled RPC'
+  'legacy direct client UPDATE still works during the expand window'
 );
+
+DELETE FROM public.push_subscriptions WHERE endpoint = 'https://push.local/e-direct';
 
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000303', true);
 SELECT lives_ok(
@@ -274,6 +283,74 @@ SELECT is(
   (SELECT count(*)::integer FROM public.push_subscriptions WHERE endpoint = 'https://push.local/e9'),
   0,
   'self-service unsubscribe removes only the caller own row'
+);
+
+-- Move deferral contract ------------------------------------------------------
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000301', true);
+SELECT lives_ok(
+  $$SELECT public.subscribe_push_subscription(
+    'https://push.local/e2-defer', 'p256dh-a2', 'auth-a2', NULL
+  )$$,
+  'owner subscribes the deferral-probe endpoint'
+);
+
+RESET ROLE;
+INSERT INTO public.notifications (recipient_profile_id, notification_type, title, actor_profile_id)
+VALUES ('00000000-0000-4000-8000-000000000301', 'new_follow', 'Hygiene defer follow', '00000000-0000-4000-8000-000000000305');
+
+UPDATE public.notification_push_deliveries d
+SET status = 'processing',
+    claimed_at = timezone('utc', now())
+FROM public.push_subscriptions ps
+WHERE ps.endpoint = 'https://push.local/e2-defer'
+  AND d.push_subscription_id = ps.id;
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000302', true);
+SELECT throws_ok(
+  $$SELECT public.subscribe_push_subscription(
+    'https://push.local/e2-defer', 'p256dh-a2', 'auth-a2', 'UA-B'
+  )$$,
+  'P0001',
+  'endpoint_move_deferred',
+  'transfer defers while an active send lease holds the endpoint'
+);
+
+RESET ROLE;
+SELECT is(
+  (SELECT count(*)::integer FROM public.push_subscriptions
+   WHERE endpoint = 'https://push.local/e2-defer'
+     AND profile_id = '00000000-0000-4000-8000-000000000301'),
+  1,
+  'deferred transfer leaves ownership unchanged'
+);
+
+RESET ROLE;
+UPDATE public.notification_push_deliveries d
+SET claimed_at = timezone('utc', now()) - interval '6 minutes'
+FROM public.push_subscriptions ps
+WHERE ps.endpoint = 'https://push.local/e2-defer'
+  AND d.push_subscription_id = ps.id;
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000302', true);
+SELECT lives_ok(
+  $$SELECT public.subscribe_push_subscription(
+    'https://push.local/e2-defer', 'p256dh-a2', 'auth-a2', 'UA-B'
+  )$$,
+  'transfer succeeds once the send lease expires'
+);
+
+RESET ROLE;
+SELECT is(
+  (SELECT count(*)::integer FROM public.notification_push_deliveries d
+   JOIN public.push_subscriptions ps ON ps.id = d.push_subscription_id
+   WHERE ps.endpoint = 'https://push.local/e2-defer'
+     AND d.status = 'cancelled'),
+  1,
+  'deferred-then-completed move still quarantines previous-owner queue'
 );
 
 -- Claim path contracts --------------------------------------------------------
