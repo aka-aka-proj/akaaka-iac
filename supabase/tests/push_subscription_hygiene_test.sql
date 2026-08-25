@@ -4,17 +4,17 @@ SELECT plan(52);
 
 -- Structural contracts -------------------------------------------------------
 
--- Expand-only rollout (api/004 §Rollout ordering): the tightening global
--- unique constraint belongs to the separate contract-step migration and must
--- NOT exist yet; its absence is part of this phase's contract.
+-- Contract-step landed (api/004 §Rollout ordering step 3): the global unique
+-- constraint now exists alongside the legacy composite constraint; detailed
+-- behavior lives in push_subscription_endpoint_unique_contract_step_test.sql.
 SELECT ok(
-  NOT EXISTS (
+  EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conrelid = 'public.push_subscriptions'::regclass
       AND conname = 'push_subscriptions_endpoint_unique'
       AND contype = 'u'
   ),
-  'global endpoint unique is deferred to the contract step'
+  'global endpoint unique is enforced as of the contract step'
 );
 
 SELECT ok(
@@ -87,10 +87,10 @@ SELECT ok(
 );
 
 SELECT ok(
-  has_table_privilege('authenticated', 'public.push_subscriptions', 'INSERT')
+  NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'INSERT')
     AND has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE')
     AND has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
-  'expand window keeps legacy client writes; contract-step will revoke them'
+  'contract-step closes direct INSERT; UPDATE/DELETE stay until their RPC replacements land'
 );
 
 SELECT ok(
@@ -238,13 +238,14 @@ SELECT is(
   'in-place rotation stores the refreshed key material'
 );
 
--- Expand-phase transition contract (api/004 §Rollout ordering step 1):
--- legacy clients keep working unchanged until the contract-step migration
--- revokes direct writes. These assertions pin that transitional allowance —
--- silently breaking old bundles here would be a rollout regression.
+-- Contract-step contract (api/004 §Rollout ordering step 3): direct client
+-- INSERT is revoked once subscribe_push_subscription owns subscription
+-- creation. UPDATE stays open until the p_mode refresh RPC lands
+-- (frontend#92); DELETE stays open until unsubscribe_push_subscription and
+-- its deletion log exist — revoking them early would strand user flows.
 SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000301', true);
-SELECT lives_ok(
+SELECT throws_ok(
   $$INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth)
     VALUES (
       '00000000-0000-4000-8000-000000000301',
@@ -252,7 +253,9 @@ SELECT lives_ok(
       'p256dh-x',
       'auth-x'
     )$$,
-  'legacy direct client INSERT still works during the expand window'
+  '42501',
+  NULL,
+  'contract-step revokes direct client INSERT; subscribe via RPC only'
 );
 
 SELECT lives_ok(
@@ -261,7 +264,7 @@ SELECT lives_ok(
     'ua-legacy',
     :'hyg_original_id'
   ),
-  'legacy direct client UPDATE still works during the expand window'
+  'direct client UPDATE stays open until the p_mode refresh RPC lands (frontend#92)'
 );
 
 DELETE FROM public.push_subscriptions WHERE endpoint = 'https://push.local/e-direct';
@@ -356,10 +359,10 @@ SELECT is(
 -- Expand-window duplicate convergence ----------------------------------------
 
 RESET ROLE;
+-- Contract-step: cross-profile duplicate pairs can no longer exist; the
+-- takeover path is exercised against a single foreign binding instead.
 INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth, updated_at)
-VALUES
-  ('00000000-0000-4000-8000-000000000301', 'https://push.local/e-dup', 'p256dh-dup', 'auth-dup', now() - interval '1 hour'),
-  ('00000000-0000-4000-8000-000000000302', 'https://push.local/e-dup', 'p256dh-other', 'auth-other', now());
+VALUES ('00000000-0000-4000-8000-000000000301', 'https://push.local/e-dup', 'p256dh-dup', 'auth-dup', now() - interval '1 hour');
 
 SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000302', true);
