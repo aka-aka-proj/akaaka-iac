@@ -11,6 +11,10 @@ export interface RecurrenceRule {
   count?: number
   until?: string
   timezone?: string
+  /** Per-instance registration deadline offset from each copy's start_time (minutes).
+   *  When set, each recurring copy's registration_deadline = its own start_time − offset.
+   *  Omit to copy the parent's absolute registration_deadline (backward compatible). */
+  registration_deadline_offset_minutes?: number
 }
 
 const DAY_MAP: Record<string, number> = {
@@ -151,12 +155,12 @@ export type UnvalidatedRecurrenceRule = Omit<RecurrenceRule, 'monthly_by'> & { m
 
 function modeAllowedFields(rule: UnvalidatedRecurrenceRule): Set<string> {
   if (rule.frequency === 'weekly') {
-    return new Set(['frequency', 'interval', 'days', 'count', 'until', 'timezone'])
+    return new Set(['frequency', 'interval', 'days', 'count', 'until', 'timezone', 'registration_deadline_offset_minutes'])
   }
   if (rule.monthly_by === 'weekday') {
-    return new Set(['frequency', 'interval', 'monthly_by', 'week_ordinal', 'days', 'count', 'until', 'timezone'])
+    return new Set(['frequency', 'interval', 'monthly_by', 'week_ordinal', 'days', 'count', 'until', 'timezone', 'registration_deadline_offset_minutes'])
   }
-  return new Set(['frequency', 'interval', 'monthly_by', 'count', 'until', 'timezone'])
+  return new Set(['frequency', 'interval', 'monthly_by', 'count', 'until', 'timezone', 'registration_deadline_offset_minutes'])
 }
 
 export function validateRecurrenceRule(rule: UnvalidatedRecurrenceRule): string | null {
@@ -186,6 +190,11 @@ export function validateRecurrenceRule(rule: UnvalidatedRecurrenceRule): string 
   // Strict path for every payload since the compat period ended (spec「部署相容期」).
   if (typeof rule.timezone !== 'string' || !isValidTimeZone(rule.timezone)) {
     return 'timezone must be a valid IANA time zone name'
+  }
+  if (rule.registration_deadline_offset_minutes !== undefined) {
+    if (!Number.isInteger(rule.registration_deadline_offset_minutes) || rule.registration_deadline_offset_minutes < 1 || rule.registration_deadline_offset_minutes > 525600) {
+      return 'registration_deadline_offset_minutes must be an integer between 1 and 525600'
+    }
   }
   if ((rule.count !== undefined) === hasUntil) {
     return 'provide either count or until, not both'
@@ -307,6 +316,18 @@ function* monthlyByWeekdayCandidates(
       .sort((a, b) => a.getTime() - b.getTime())
     for (const candidate of dates) yield candidate
   }
+}
+
+/**
+ * Compute the registration_deadline for a recurring instance based on the
+ * recurrence rule's optional offset template.
+ * Returns undefined when the rule has no offset → caller should fall back to
+ * copying the parent event's absolute deadline (backward compatible).
+ */
+export function computeInstanceRegistrationDeadline(startTimeMs: number, rule: RecurrenceRule): string | undefined {
+  const offset = rule.registration_deadline_offset_minutes
+  if (offset === undefined || offset === null) return undefined
+  return new Date(startTimeMs - offset * 60000).toISOString()
 }
 
 /**

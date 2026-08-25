@@ -1,4 +1,4 @@
-import { generateRecurringDates, validateRecurrenceRule, RecurrenceSeriesTooLongError } from './recurrence.ts'
+import { generateRecurringDates, validateRecurrenceRule, RecurrenceSeriesTooLongError, computeInstanceRegistrationDeadline } from './recurrence.ts'
 import type { RecurrenceRule, UnvalidatedRecurrenceRule } from './recurrence.ts'
 
 function assertEquals<T>(actual: T, expected: T): void {
@@ -336,4 +336,62 @@ Deno.test('V20 legacy payload shapes are rejected once the compat period ends', 
     validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 2, until: '2026-09-30T00:00:00.000Z' }),
     'timezone must be a valid IANA time zone name',
   )
+})
+
+// registration_deadline_offset_minutes validation
+
+Deno.test('offset validation rejects zero', () => {
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: 0 }),
+    'registration_deadline_offset_minutes must be an integer between 1 and 525600',
+  )
+})
+
+Deno.test('offset validation rejects negative', () => {
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: -24 }),
+    'registration_deadline_offset_minutes must be an integer between 1 and 525600',
+  )
+})
+
+Deno.test('offset validation rejects non-integer', () => {
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: 24.5 }),
+    'registration_deadline_offset_minutes must be an integer between 1 and 525600',
+  )
+})
+
+Deno.test('offset validation rejects above max', () => {
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: 525601 }),
+    'registration_deadline_offset_minutes must be an integer between 1 and 525600',
+  )
+})
+
+Deno.test('offset validation accepts boundary values', () => {
+  assertEquals(validateRecurrenceRule({ frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: 1 }), null)
+  assertEquals(validateRecurrenceRule({ frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: 525600 }), null)
+})
+
+Deno.test('offset validation accepts missing field (backward compat)', () => {
+  assertEquals(validateRecurrenceRule({ frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei' }), null)
+})
+
+// computeInstanceRegistrationDeadline helper
+
+Deno.test('computeInstanceRegistrationDeadline returns undefined when offset absent', () => {
+  assertEquals(computeInstanceRegistrationDeadline(1724000000000, { frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei' }), undefined)
+})
+
+Deno.test('computeInstanceRegistrationDeadline computes deadline before start_time', () => {
+  // start = 2026-09-07T12:00:00.000Z, offset = 1440 minutes (24h)
+  const startMs = new Date('2026-09-07T12:00:00.000Z').getTime()
+  const result = computeInstanceRegistrationDeadline(startMs, { frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: 1440 })
+  assertEquals(result, '2026-09-06T12:00:00.000Z')
+})
+
+Deno.test('computeInstanceRegistrationDeadline handles non-round offset', () => {
+  const startMs = new Date('2026-09-07T12:00:00.000Z').getTime()
+  const result = computeInstanceRegistrationDeadline(startMs, { frequency: 'weekly', interval: 1, days: ['Mon'], count: 4, timezone: 'Asia/Taipei', registration_deadline_offset_minutes: 30 })
+  assertEquals(result, '2026-09-07T11:30:00.000Z')
 })
