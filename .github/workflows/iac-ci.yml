@@ -129,7 +129,7 @@ jobs:
       - name: Check push subscription hygiene boundary
         if: matrix.target.name == 'migrations'
         run: |
-          expand="supabase/migrations/20260825000000_push_subscription_hygiene.sql"
+          expand="supabase/migrations/20260826120000_push_subscription_hygiene.sql"
 
           for required in \
             "notification_push_deliveries_status_check" \
