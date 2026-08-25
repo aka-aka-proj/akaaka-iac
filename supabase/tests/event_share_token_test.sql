@@ -4,7 +4,7 @@ BEGIN;
 -- 結構性驗證：definer/search_path/grants/條件檢查/token 表存取封鎖/trigger。
 -- 行為測試（token 有效與否）依賴 auth session context，由 staging synthetic fixture 驗證。
 
-SELECT plan(30);
+SELECT plan(32);
 
 -- ============================================================
 -- SECURITY DEFINER + fixed search_path
@@ -210,6 +210,24 @@ SELECT ok(
   (SELECT p.prosecdef FROM pg_proc p
    WHERE p.oid = 'public.delete_share_token_off_private()'::regprocedure),
   'hygiene trigger function is security definer'
+);
+
+SELECT ok(
+  position('publication_status' in pg_get_functiondef('public.delete_share_token_off_private()'::regprocedure)) > 0
+    AND position('lifecycle_status' in pg_get_functiondef('public.delete_share_token_off_private()'::regprocedure)) > 0,
+  'hygiene deletes tokens on unpublish and draft regression too'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    WHERE c.relname = 'events'
+      AND t.tgname = 'trg_delete_share_token_off_private'
+      AND pg_get_triggerdef(t.oid) LIKE '%publication_status%'
+      AND pg_get_triggerdef(t.oid) LIKE '%lifecycle_status%'
+  ),
+  'hygiene trigger watches publication and lifecycle columns'
 );
 
 SELECT * FROM finish();

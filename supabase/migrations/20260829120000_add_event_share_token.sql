@@ -37,22 +37,31 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, extensions
 AS $$
+DECLARE
+  v_is_shareable BOOLEAN;
 BEGIN
-  INSERT INTO public.event_share_tokens (event_id, token)
-  SELECT p_event_id, encode(gen_random_bytes(24), 'hex')
+  -- Row lock serializes against concurrent visibility/publication updates:
+  -- re-evaluated after any conflicting transaction commits, so a token can
+  -- never be minted for an event that just left the published+private state.
+  SELECT e.creator_id = auth.uid()
+     AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
+    INTO v_is_shareable
   FROM public.events e
   WHERE e.id = p_event_id
-    AND e.creator_id = auth.uid()
-    AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
+  FOR UPDATE;
+
+  IF NOT v_is_shareable THEN
+    RETURN NULL;
+  END IF;
+
+  INSERT INTO public.event_share_tokens (event_id, token)
+  VALUES (p_event_id, encode(gen_random_bytes(24), 'hex'))
   ON CONFLICT (event_id) DO NOTHING;
 
   RETURN (
     SELECT est.token
     FROM public.event_share_tokens est
-    JOIN public.events e ON e.id = est.event_id
     WHERE est.event_id = p_event_id
-      AND e.creator_id = auth.uid()
-      AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
   );
 END;
 $$;
@@ -65,36 +74,30 @@ SET search_path = public, extensions
 AS $$
 DECLARE
   new_token TEXT;
+  v_is_shareable BOOLEAN;
 BEGIN
-  UPDATE public.event_share_tokens est
-  SET token = encode(gen_random_bytes(24), 'hex'),
-      updated_at = timezone('utc', now())
+  -- Same serialization contract as ensure_event_share_token.
+  SELECT e.creator_id = auth.uid()
+     AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
+    INTO v_is_shareable
   FROM public.events e
-  WHERE est.event_id = p_event_id
-    AND e.id = p_event_id
-    AND e.creator_id = auth.uid()
-    AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
-  RETURNING est.token INTO new_token;
+  WHERE e.id = p_event_id
+  FOR UPDATE;
 
-  IF new_token IS NOT NULL THEN
-    RETURN new_token;
+  IF NOT v_is_shareable THEN
+    RETURN NULL;
   END IF;
 
   INSERT INTO public.event_share_tokens (event_id, token)
-  SELECT p_event_id, encode(gen_random_bytes(24), 'hex')
-  FROM public.events e
-  WHERE e.id = p_event_id
-    AND e.creator_id = auth.uid()
-    AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
-  ON CONFLICT (event_id) DO NOTHING;
+  VALUES (p_event_id, encode(gen_random_bytes(24), 'hex'))
+  ON CONFLICT (event_id) DO UPDATE
+    SET token = encode(gen_random_bytes(24), 'hex'),
+        updated_at = timezone('utc', now());
 
   RETURN (
     SELECT est.token
     FROM public.event_share_tokens est
-    JOIN public.events e ON e.id = est.event_id
     WHERE est.event_id = p_event_id
-      AND e.creator_id = auth.uid()
-      AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
   );
 END;
 $$;
@@ -206,7 +209,11 @@ SECURITY DEFINER
 SET search_path = public, extensions
 AS $$
 BEGIN
-  IF COALESCE(NEW.visibility_settings ->> 'type', 'public') IS DISTINCT FROM 'private' THEN
+  IF NOT (
+    NEW.lifecycle_status <> 'draft'
+    AND NEW.publication_status = 'published'
+    AND COALESCE(NEW.visibility_settings ->> 'type', 'public') = 'private'
+  ) THEN
     DELETE FROM public.event_share_tokens WHERE event_id = NEW.id;
   END IF;
   RETURN NEW;
@@ -217,6 +224,6 @@ REVOKE ALL ON FUNCTION public.delete_share_token_off_private() FROM PUBLIC;
 
 DROP TRIGGER IF EXISTS trg_delete_share_token_off_private ON public.events;
 CREATE TRIGGER trg_delete_share_token_off_private
-  BEFORE UPDATE OF visibility_settings ON public.events
+  BEFORE UPDATE OF visibility_settings, publication_status, lifecycle_status ON public.events
   FOR EACH ROW
   EXECUTE FUNCTION public.delete_share_token_off_private();
