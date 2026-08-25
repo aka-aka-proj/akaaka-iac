@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - preview
     paths:
       - "supabase/migrations/**"
       - "supabase/tests/**"
@@ -253,6 +254,120 @@ jobs:
               exit 1
             fi
           done
+
+  # Deterministic contract gate（契約：001-vercel-deployment-spec.md「Weekly scheduled
+  # production release」breaking-change gate clause (1) 與 docs-first binding bullet）：
+  # 凡觸及 supabase/migrations/** 或 supabase/functions/** 的 PR，body 必須宣告
+  # `Compatibility: backward-compatible | expand-only | contract-step`，check 對照 diff
+  # 特徵交叉驗證（drop column/table/constraint/policy、REVOKE 等 RLS 收緊、SET NOT NULL、
+  # Edge Function export 移除）；未宣告或不符即 fail——未宣告的 contract step 不得達 preview。
+  # 同時強制 `Docs:` 宣告 required gate：被引用的 akaaka-docs PR 必須已合併進 docs main，
+  # 使 backward-compatible／expand-only hotfix 也無法在權威文件未落地時進入 main。
+  contract-gate:
+    name: Compatibility & docs-first declaration gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      # 同 repo 的 body/files 讀取用 github.token 即可；AKA_REPO_TOKEN 僅在
+      # 宣告引用 akaaka-docs PR 時（跨 repo 合併狀態驗證）才需要，缺漏時於
+      # 步驟內顯式報錯而非讓所有 gh 呼叫以 exit 4 空白崩潰
+      GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN || github.token }}
+      CROSS_REPO_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      DOCS_REPO: aka-aka-proj/akaaka-docs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Cross-validate Compatibility and Docs declarations
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          # 安全 gate 必須 fail-closed：無法取得 diff（權限／rate limit／暫時性錯誤）
+          # 時不得視為「沒有契約變更」而放行
+          body="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""')" \
+            || { echo "::error::cannot read PR body; refusing to evaluate contract gate on unknown input"; exit 1; }
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate > /tmp/pr_files.json 2>/dev/null; then
+            echo "::error::cannot fetch PR files; refusing to evaluate contract gate on unknown diff"
+            exit 1
+          fi
+          jq -s 'flatten' /tmp/pr_files.json > /tmp/pr_files_flat.json
+
+          touches=0
+          while IFS= read -r f; do
+            case "$f" in
+              supabase/migrations/* | supabase/functions/*) touches=1; break ;;
+            esac
+          done < <(jq -r '.[].filename' /tmp/pr_files_flat.json)
+
+          compat="$(printf '%s' "$body" | awk 'tolower($0) ~ /^compatibility:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')"
+          docs_decl="$(printf '%s' "$body" | awk 'tolower($0) ~ /^docs:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
+
+          if [ "$touches" -eq 0 ]; then
+            # 不觸及 Supabase 契約路徑：宣告非必填，但已宣告時仍驗格式
+            if [ -n "$compat" ] && ! printf '%s' "$compat" | grep -Eq '^(backward-compatible|expand-only|contract-step)$'; then
+              fail "Compatibility value '$compat' is not one of backward-compatible | expand-only | contract-step"
+            fi
+            echo "PR does not touch supabase contract paths; declaration gate satisfied."
+            exit 0
+          fi
+
+          case "$compat" in
+            backward-compatible|expand-only|contract-step) : ;;
+            "") fail "PR touches supabase/migrations or supabase/functions but the body is missing the required declaration: 'Compatibility: backward-compatible | expand-only | contract-step'" ;;
+            *) fail "Compatibility value '$compat' is not one of backward-compatible | expand-only | contract-step" ;;
+          esac
+
+          # Diff 交叉驗證：偵測破壞性特徵（migrations 新增行 vs functions 刪除的 export 行）。
+          # 偵得破壞特徵而未宣告 contract-step 即 mismatch → fail；
+          # 宣告 contract-step 但 diff 無可偵測特徵不擋（動態 SQL 等不可靜態偵測情境從寬）。
+          detected=""
+          mig_pat='(DROP[[:space:]]+(TABLE|COLUMN|CONSTRAINT|POLICY|FUNCTION|SCHEMA)|ALTER[[:space:]]+TABLE[^;]*DROP[[:space:]]+(COLUMN|CONSTRAINT)|REVOKE[[:space:]]|SET[[:space:]]+NOT[[:space:]]+NULL)'
+          while IFS= read -r entry; do
+            fname="${entry%%$'\t'*}"
+            patch="$(jq -r --arg f "$fname" '[.[] | select(.filename == $f)][0].patch // ""' /tmp/pr_files_flat.json)"
+            case "$fname" in
+              supabase/migrations/*)
+                hits="$(printf '%s' "$patch" | grep '^+' | grep -Ei "$mig_pat" || true)"
+                if [ -n "$hits" ]; then detected="migrations:$fname"; fi
+                ;;
+              supabase/functions/*)
+                dels="$(printf '%s' "$patch" | grep '^-.*export ' || true)"
+                if [ -n "$dels" ]; then detected="functions-export-removed:$fname"; fi
+                ;;
+            esac
+            [ -z "$detected" ] || break
+          done < <(jq -r '.[] | [.filename] | @tsv' /tmp/pr_files_flat.json)
+
+          if [ -n "$detected" ] && [ "$compat" != "contract-step" ]; then
+            fail "Declaration mismatch: diff shows breaking change ($detected) but declared '$compat'. Declare 'Compatibility: contract-step' or fix the change."
+          fi
+
+          # Docs-first binding required gate：`Docs:` 必填；引用的 akaaka-docs PR 必須
+          # 存在且已合併進 docs main（含 out-of-band hotfix 一律適用）
+          if [ -z "$docs_decl" ]; then
+            fail "PR body is missing the required 'Docs:' declaration ('Docs: none' or akaaka-docs PR numbers). Contract: docs-first binding in 001-vercel-deployment-spec.md."
+          fi
+          if [ "$(printf '%s' "$docs_decl" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "none" ]; then
+            if [ -z "$CROSS_REPO_TOKEN" ]; then
+              fail "AKA_REPO_TOKEN secret is required to validate akaaka-docs dependency merge state; set it or declare 'Docs: none' when no docs change is needed"
+            fi
+            for dnum in $(printf '%s' "$docs_decl" | tr ',' ' '); do
+              case "$dnum" in ''|*[!0-9]*) fail "Docs reference '$dnum' is not an akaaka-docs PR number" ;; esac
+              stamp="$(gh api "repos/$DOCS_REPO/pulls/$dnum" --jq '[(.state // ""),((.merged // false)|tostring),(.base.ref // "")] | @tsv' 2>/dev/null)" \
+                || fail "Referenced akaaka-docs PR #$dnum does not exist"
+              dst="$(printf '%s' "$stamp" | cut -f1)"; dmrg="$(printf '%s' "$stamp" | cut -f2)"; dbs="$(printf '%s' "$stamp" | cut -f3)"
+              if [ "$dst" != "closed" ] || [ "$dmrg" != "true" ] || [ "$dbs" != "main" ]; then
+                fail "Referenced akaaka-docs PR #$dnum is not merged into $DOCS_REPO main (state=$dst merged=$dmrg); authoritative documentation must land first"
+              fi
+            done
+          fi
+
+          echo "contract-gate passed (Compatibility=$compat; Docs=$docs_decl)"
 
   cloudflare-ledger-checks:
     name: Verify Cloudflare deletion ledger provider
