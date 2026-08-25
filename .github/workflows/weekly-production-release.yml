@@ -21,6 +21,15 @@ on:
     # Friday 00:19 UTC = Friday 08:19 Asia/Taipei (UTC+8, no DST); off top-of-hour to avoid scheduler high-load drops
     - cron: '19 0 * * 5'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "release = full flow; dry-run = read-only planning + report only"
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - dry-run
 
 permissions:
   contents: read
@@ -33,12 +42,38 @@ env:
   GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
   REPORT_TO: ${{ vars.RELEASE_REPORT_TO || 'akaaka.events@gmail.com' }}
   REPORT_FROM: ${{ vars.RELEASE_REPORT_FROM || 'onboarding@resend.dev' }}
+  RELEASE_MODE: ${{ inputs.mode || 'release' }}
+  RELEASE_STATE_BRANCH: weekly-release-state
 
 jobs:
+  manifest:
+    name: Snapshot preview heads
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      iac: ${{ steps.snap.outputs.iac }}
+      frontend: ${{ steps.snap.outputs.frontend }}
+    steps:
+      - name: Record release manifest SHAs
+        id: snap
+        env:
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          snap() {
+            repo="$1"; key="$2"
+            sha="$(gh api "repos/$repo/branches/preview" --jq '.commit.sha' 2>/dev/null || true)"
+            if [ -z "$sha" ]; then sha="absent"; fi
+            printf '%s=%s\n' "$key" "$sha" >> "$GITHUB_OUTPUT"
+          }
+          snap aka-aka-proj/akaaka-iac iac
+          snap aka-aka-proj/akaaka-frontend frontend
+
   release-iac:
     name: Release akaaka-iac
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    needs: [manifest]
     outputs:
       result: ${{ steps.release.outputs.result }}
       pr: ${{ steps.release.outputs.pr }}
@@ -51,6 +86,7 @@ jobs:
         env:
           REPO: aka-aka-proj/akaaka-iac
           CD_WORKFLOW: iac-cd.yml
+          PINNED_SHA: ${{ needs.manifest.outputs.iac }}
         run: |
           set -uo pipefail
           result="failed"; pr=""; sha=""; deploy="unknown"; detail=""
@@ -61,67 +97,133 @@ jobs:
           }
           trap cleanup EXIT
 
+          touches_cd_paths() {
+            local f
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                supabase/migrations/* | supabase/functions/* | .github/workflows/iac-cd.yml) return 0 ;;
+              esac
+            done
+            return 1
+          }
+          # checkpoint 存於 orchestrator repo（GITHUB_REPOSITORY）；用各 stage 的 REPO 讀會在 frontend 找錯 repo，resume 靜默失效
+          state_get() {
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+          }
+
           ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
-          if [ "${ahead:-0}" -eq 0 ]; then
-            result="no-changes"; detail="preview has no commits ahead of main"; exit 0
-          fi
-
           existing="$(gh pr list -R "$REPO" --base main --head preview --state open --json number --jq '.[0].number // ""')"
-          if [ -z "$existing" ]; then
-            title="chore(release): weekly production release $(date -u +%F)"
-            pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
-              --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
-            sleep 20  # 讓 checks 完成註冊
-          else
-            pr="$existing"
+
+          if [ "$RELEASE_MODE" = "dry-run" ]; then
+            result="dry-run"
+            detail="dry-run: preview ahead_by=${ahead:-0}; open PR=${existing:-none}; no mutations performed"
+            exit 0
           fi
 
-          # 等 checks 全數完成且成功；有失敗立即中止
-          deadline=$((SECONDS + 2700))
-          while :; do
-            rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
-            bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
-            if [ "${bad:-0}" -gt 0 ]; then
-              detail="PR #$pr checks failed"; exit 0
+          resume_watch=0
+          if [ "${ahead:-0}" -eq 0 ]; then
+            prev="$(state_get iac)"
+            prevsha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
+            prevdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
+            if [ -n "$prevsha" ] && [ "$prevdep" != "success" ] && [ "$prevdep" != "no-deploy" ]; then
+              result="released"; sha="$prevsha"; deploy="verifying"; resume_watch=1
+              detail="resume: re-verifying deployment of previously merged $sha (last deploy=$prevdep)"
+            else
+              result="no-changes"; detail="preview even with main; previous release fully verified"; exit 0
             fi
-            pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
-            state="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
-            if [ "$state" = "DIRTY" ]; then
-              detail="PR #$pr has merge conflicts with main; manual resolution required"; exit 0
+          else
+            if [ -z "$existing" ]; then
+              title="chore(release): weekly production release $(date -u +%F)"
+              pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
+                --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
+              sleep 20  # 讓 checks 完成註冊
+            else
+              pr="$existing"
             fi
-            if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "CLEAN" ] || [ "$state" = "HAS_HOOKS" ] || [ "$state" = "UNBLOCKED" ]; }; then
-              break
-            fi
-            if (( SECONDS >= deadline )); then
-              detail="timed out waiting for PR #$pr checks (state=$state pending=$pending)"; exit 0
-            fi
-            sleep 30
-          done
 
-          # iac-cd.yml 只在特定路徑變更時觸發；必須在 merge 前比對 diff（merge 後 main...preview 為空）
-          cd_files="$(gh api "repos/$REPO/compare/main...preview" --jq '.files[].filename')" || { detail="compare API failed before merge"; exit 0; }
-          will_deploy=0
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              supabase/migrations/* | supabase/functions/* | .github/workflows/iac-cd.yml)
-                will_deploy=1; break ;;
-            esac
-          done <<< "$cd_files"
+            # 等 checks 全數完成且成功；有失敗立即中止
+            deadline=$((SECONDS + 2700))
+            while :; do
+              rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
+              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
+              if [ "${bad:-0}" -gt 0 ]; then
+                detail="PR #$pr checks failed"; exit 0
+              fi
+              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
+              state="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
+              if [ "$state" = "DIRTY" ]; then
+                detail="PR #$pr has merge conflicts with main; manual resolution required"; exit 0
+              fi
+              if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "CLEAN" ] || [ "$state" = "HAS_HOOKS" ] || [ "$state" = "UNBLOCKED" ]; }; then
+                break
+              fi
+              if (( SECONDS >= deadline )); then
+                detail="timed out waiting for PR #$pr checks (state=$state pending=$pending)"; exit 0
+              fi
+              sleep 30
+            done
 
-          gh pr merge "$pr" -R "$REPO" --merge >/dev/null || { detail="merge of PR #$pr failed"; exit 0; }
-          sha="$(gh pr view "$pr" -R "$REPO" --json mergeCommit --jq '.mergeCommit.oid')"
-          result="released"
+            # Release manifest：merge 前驗證 PR head 仍等於 run 起點快照
+            cur_head="$(gh api "repos/$REPO/branches/preview" --jq '.commit.sha')" || { detail="failed to read current preview head"; exit 0; }
+            if [ "$cur_head" != "$PINNED_SHA" ]; then
+              # abort 必須讓 job 失敗，GitHub Actions 才會 skip 下游 stage，維持 IaC -> Frontend 發版順序
+              result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
+            fi
 
-          if [ "$will_deploy" -eq 0 ]; then
-            deploy="no-deploy"; detail="merged PR #$pr ($sha); no iac-cd.yml trigger paths changed"; exit 0
+            # iac-cd.yml 只在特定路徑變更時觸發；必須在 merge 前比對 diff（merge 後 main...preview 為空）
+            cd_files="$(gh api "repos/$REPO/compare/main...preview" --jq '.files[].filename')" || { detail="compare API failed before merge"; exit 0; }
+            will_deploy=0
+            if printf '%s' "$cd_files" | touches_cd_paths; then will_deploy=1; fi
+
+            # CAS merge：以 expected-head sha 原子拒絕 head 已變動的合併
+            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控；
+            # 否則視為 rejected（head moved / API 錯誤），本次無新部署事實
+            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
+            if [ -z "$sha" ]; then
+              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
+              else
+                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
+              fi
+            fi
+            result="released"
+
+            if [ "$will_deploy" -eq 0 ]; then
+              # 新 merge 未觸發 CD 不代表前次失敗已解決：保留 prevsha+failed，供下次 run 繼續驗證而非永久跳過
+              prev="$(state_get iac)"
+              psha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
+              pdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
+              if [ -n "$psha" ] && [ "$pdep" != "success" ] && [ "$pdep" != "no-deploy" ]; then
+                new_sha="$sha"; sha="$psha"; deploy="failed"
+                detail="merged PR #$pr ($new_sha) with no CD trigger paths; previous deployment of $psha still $pdep, keeping failed state"
+                exit 1
+              fi
+              deploy="no-deploy"; detail="merged PR #$pr ($sha); no iac-cd.yml trigger paths changed"; exit 0
+            fi
+          fi
+
+          if [ "$resume_watch" -eq 1 ]; then
+            # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過；
+            # commit 可能超過單頁 30 檔，必須分頁取得完整檔案清單再判斷觸發路徑
+            if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --paginate --jq '.files[].filename')"; then
+              deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 1
+            fi
+            will_deploy=0
+            if printf '%s' "$commit_files" | touches_cd_paths; then will_deploy=1; fi
+            if [ "$will_deploy" -eq 0 ]; then
+              deploy="no-deploy"; detail="resume: previous merge $sha touched no iac-cd.yml trigger paths"; exit 0
+            fi
           fi
 
           # 監看 main 上的 iac-cd.yml run 直到結束
           deadline=$((SECONDS + 2400))
           while :; do
-            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --limit 10 --json databaseId,headSha,status,conclusion)"
-            run="$(printf '%s' "$run_json" | jq -r "[.[] | select(.headSha == \"$sha\")][0].databaseId // \"\"")"
+            # 以 commit SHA 伺服器端篩選，避免較新 run 超過 limit 後永遠找不到目標 run（含 operator 的 rerun attempt）
+            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --commit "$sha" --limit 30 --json databaseId,status,conclusion)"
+            run="$(printf '%s' "$run_json" | jq -r '[.[]][0].databaseId // ""')"
             if [ -n "$run" ]; then
               st="$(gh run view "$run" -R "$REPO" --json status,conclusion)"
               status="$(printf '%s' "$st" | jq -r '.status')"; conc="$(printf '%s' "$st" | jq -r '.conclusion')"
@@ -131,15 +233,17 @@ jobs:
                   detail="Supabase production deploy succeeded (run https://github.com/$REPO/actions/runs/$run)"
                 else
                   deploy="failed"
-                  detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run)"
+                  detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run); awaiting manual remediation: rerun that run or revert/hotfix — orchestrator never auto-retries (spec 001)"
                 fi
+                # 嚴格順序：IaC 部署失敗／逾時讓 stage 失敗，GitHub Actions skip 下游 stage
+                case "$deploy" in failed|timeout) exit 1 ;; esac
                 exit 0
               fi
             elif (( SECONDS > 600 )); then
-              deploy="failed"; detail="iac-cd.yml run for $sha not found within 10 minutes"; exit 0
+              deploy="failed"; detail="iac-cd.yml run for $sha not found within 10 minutes"; exit 1
             fi
             if (( SECONDS >= deadline )); then
-              deploy="timeout"; detail="timed out watching iac-cd.yml for $sha"; exit 0
+              deploy="timeout"; detail="timed out watching iac-cd.yml for $sha"; exit 1
             fi
             sleep 30
           done
@@ -148,7 +252,7 @@ jobs:
     name: Release akaaka-frontend
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    needs: [release-iac]
+    needs: [manifest, release-iac]
     outputs:
       result: ${{ steps.release.outputs.result }}
       pr: ${{ steps.release.outputs.pr }}
@@ -160,6 +264,7 @@ jobs:
         id: release
         env:
           REPO: aka-aka-proj/akaaka-frontend
+          PINNED_SHA: ${{ needs.manifest.outputs.frontend }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -173,49 +278,87 @@ jobs:
           }
           trap cleanup EXIT
 
+          # checkpoint 存於 orchestrator repo（GITHUB_REPOSITORY）；用各 stage 的 REPO 讀會在 frontend 找錯 repo，resume 靜默失效
+          state_get() {
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+          }
+
           ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
-          if [ "${ahead:-0}" -eq 0 ]; then
-            result="no-changes"; detail="preview has no commits ahead of main"; exit 0
-          fi
-
           existing="$(gh pr list -R "$REPO" --base main --head preview --state open --json number --jq '.[0].number // ""')"
-          if [ -z "$existing" ]; then
-            title="chore(release): weekly production release $(date -u +%F)"
-            pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
-              --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
-            sleep 20
-          else
-            pr="$existing"
+
+          if [ "$RELEASE_MODE" = "dry-run" ]; then
+            result="dry-run"
+            detail="dry-run: preview ahead_by=${ahead:-0}; open PR=${existing:-none}; no mutations performed"
+            exit 0
           fi
 
-          deadline=$((SECONDS + 3600))
-          while :; do
-            rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
-            bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
-            if [ "${bad:-0}" -gt 0 ]; then
-              detail="PR #$pr checks failed"; exit 0
+          if [ "${ahead:-0}" -eq 0 ]; then
+            prev="$(state_get frontend)"
+            prevsha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
+            prevdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
+            if [ -n "$prevsha" ] && [ "$prevdep" != "success" ]; then
+              result="released"; sha="$prevsha"
+              detail="resume: re-verifying Vercel deployment of previously merged $sha (last deploy=$prevdep)"
+            else
+              result="no-changes"; detail="preview even with main; previous release fully verified"; exit 0
             fi
-            pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
-            state="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
-            if [ "$state" = "DIRTY" ]; then
-              detail="PR #$pr has merge conflicts with main; manual resolution required"; exit 0
+          else
+            if [ -z "$existing" ]; then
+              title="chore(release): weekly production release $(date -u +%F)"
+              pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
+                --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
+              sleep 20
+            else
+              pr="$existing"
             fi
-            if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "CLEAN" ] || [ "$state" = "HAS_HOOKS" ] || [ "$state" = "UNBLOCKED" ]; }; then
-              break
-            fi
-            if (( SECONDS >= deadline )); then
-              detail="timed out waiting for PR #$pr checks (state=$state pending=$pending)"; exit 0
-            fi
-            sleep 30
-          done
 
-          gh pr merge "$pr" -R "$REPO" --merge >/dev/null || { detail="merge of PR #$pr failed"; exit 0; }
-          sha="$(gh pr view "$pr" -R "$REPO" --json mergeCommit --jq '.mergeCommit.oid')"
-          result="released"
+            deadline=$((SECONDS + 3600))
+            while :; do
+              rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
+              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
+              if [ "${bad:-0}" -gt 0 ]; then
+                detail="PR #$pr checks failed"; exit 0
+              fi
+              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
+              state="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
+              if [ "$state" = "DIRTY" ]; then
+                detail="PR #$pr has merge conflicts with main; manual resolution required"; exit 0
+              fi
+              if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "CLEAN" ] || [ "$state" = "HAS_HOOKS" ] || [ "$state" = "UNBLOCKED" ]; }; then
+                break
+              fi
+              if (( SECONDS >= deadline )); then
+                detail="timed out waiting for PR #$pr checks (state=$state pending=$pending)"; exit 0
+              fi
+              sleep 30
+            done
 
-          # 輪詢 Vercel：以 merge commit SHA 對應的 production deployment 直到 READY/ERROR
+            # Release manifest：merge 前驗證 PR head 仍等於 run 起點快照
+            cur_head="$(gh api "repos/$REPO/branches/preview" --jq '.commit.sha')" || { detail="failed to read current preview head"; exit 0; }
+            if [ "$cur_head" != "$PINNED_SHA" ]; then
+              # abort 必須讓 job 失敗，GitHub Actions 才會 skip 下游 stage，維持 IaC -> Frontend 發版順序
+              result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
+            fi
+
+            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控
+            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
+            if [ -z "$sha" ]; then
+              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
+              else
+                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
+              fi
+            fi
+            result="released"
+          fi
+
+          # 輪詢 Vercel：先在 10 分鐘內找到 merge commit SHA 對應的 production deployment，
+          # 再於後續 30 分鐘內等到終止狀態（READY／ERROR／CANCELED）
           vercel_uid=""
-          deadline=$((SECONDS + 1500))
+          disc_deadline=$((SECONDS + 600))
+          poll_deadline=$((disc_deadline + 1800))
           while :; do
             resp="$(curl -fsS --max-time 30 \
               "https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&teamId=${VERCEL_ORG_ID}&target=production&limit=20" \
@@ -237,7 +380,12 @@ jobs:
                   : ;;
               esac
             fi
-            if (( SECONDS >= deadline )); then
+            if [ -z "$vercel_uid" ] && (( SECONDS >= disc_deadline )); then
+              deploy="failed"
+              detail="Vercel production deployment for $sha not found within 10 minutes"
+              break
+            fi
+            if (( SECONDS >= poll_deadline )); then
               deploy="timeout"
               detail="timed out waiting for Vercel production deployment of $sha"
               break
@@ -256,13 +404,19 @@ jobs:
               detail="$detail; SPA route smoke check passed"
             fi
           fi
-          exit 0
+          # 部署失敗／逾時必須讓 stage 失敗，GitHub Actions 才會 skip 下游 stage，落實「第一個失敗即中止」的發佈順序
+          case "$deploy" in
+            failed|timeout)
+              exit 1 ;;
+            *)
+              exit 0 ;;
+          esac
 
   release-docs:
     name: Release akaaka-docs
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: [release-frontend]
+    needs: [manifest, release-frontend]
     outputs:
       result: ${{ steps.release.outputs.result }}
       pr: ${{ steps.release.outputs.pr }}
@@ -284,50 +438,80 @@ jobs:
           }
           trap cleanup EXIT
 
-          # akaaka-docs 沒有 preview 分支（feature branch -> main 直流）；缺分支時直接 no-op
-          if ! gh api "repos/$REPO/branches/preview" --jq '.name' >/dev/null 2>&1; then
-            result="no-changes"; detail="docs has no preview branch; releases flow via feature-branch PRs to main"; exit 0
+          # 新契約：docs 無 preview 分支；orchestrator 合併「已人工核准的 task -> main PR」
+          if [ "$RELEASE_MODE" = "dry-run" ]; then
+            open_prs="$(gh pr list -R "$REPO" --base main --state open --limit 200 --json number --jq '[.[].number] | join(",")')"
+            result="dry-run"
+            detail="dry-run: open docs release PRs=[${open_prs:-none}]; no mutations performed"
+            exit 0
           fi
 
-          ahead="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')" || { detail="compare API failed"; exit 0; }
-          if [ "${ahead:-0}" -eq 0 ]; then
-            result="no-changes"; detail="docs has no commits ahead of main"; exit 0
+          mapfile -t rows < <(gh pr list -R "$REPO" --base main --state open --limit 200 --json number,headRefOid --jq '.[] | [.number, .headRefOid] | @tsv')
+          if [ "${#rows[@]}" -eq 0 ]; then
+            result="no-changes"; detail="no open task->main PRs on akaaka-docs"; exit 0
           fi
 
-          existing="$(gh pr list -R "$REPO" --base main --head preview --state open --json number --jq '.[0].number // ""')"
-          if [ -z "$existing" ]; then
-            title="chore(release): weekly docs sync $(date -u +%F)"
-            pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
-              --body "Automated weekly documentation sync.")" || { detail="PR creation failed for $REPO"; exit 0; }
-            sleep 20
-          else
-            pr="$existing"
-          fi
+          stage_deadline=$((SECONDS + 2700))
+          merged_count=0; last_pr=""; last_sha=""
+          for row in "${rows[@]}"; do
+            n="${row%%$'\t'*}"; expect="${row##*$'\t'}"
 
-          deadline=$((SECONDS + 2700))
-          while :; do
-            rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
-            bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
-            if [ "${bad:-0}" -gt 0 ]; then
-              detail="PR #$pr checks failed"; exit 0
+            # 僅計「目前實際具寫入權限」帳號的 APPROVED：association（MEMBER/COLLABORATOR）不保證現行權限，
+            # 須以 collaborators/{login}/permission 查得 write/admin 才算數；查詢失敗時 fail-closed 不計，
+            # 落實「具寫入權限者 APPROVED 才可合併」契約
+            approvals=0
+            while IFS= read -r reviewer; do
+              [ -z "$reviewer" ] && continue
+              perm="$(gh api "repos/$REPO/collaborators/$reviewer/permission" --jq '.permission_name // .permission' 2>/dev/null || true)"
+              case "$perm" in
+                admin|write) approvals=$((approvals+1)) ;;
+              esac
+            done < <(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not)) | .author.login] | unique | .[]')
+            if [ "${approvals:-0}" -eq 0 ]; then
+              detail+="PR #$n skipped (awaiting human approval); "
+              continue
             fi
-            pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
-            state="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
-            if [ "$state" = "DIRTY" ]; then
-              detail="PR #$pr has merge conflicts with main; manual resolution required"; exit 0
+
+            ok=1
+            while :; do
+              rollup="$(gh pr view "$n" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
+              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
+              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
+              mstate="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
+              if [ "${bad:-0}" -gt 0 ] || [ "$mstate" = "DIRTY" ]; then
+                detail+="PR #$n checks failed/conflicted; "; ok=0; break
+              fi
+              if [ "${pending:-0}" -eq 0 ] && { [ "$mstate" = "CLEAN" ] || [ "$mstate" = "HAS_HOOKS" ] || [ "$mstate" = "UNBLOCKED" ]; }; then
+                break
+              fi
+              if (( SECONDS >= stage_deadline )); then
+                detail+="PR #$n timed out waiting for checks; "; ok=0; break
+              fi
+              sleep 30
+            done
+            [ "$ok" -eq 1 ] || continue
+
+            # 回應遺失 ≠ 合併失敗：以 PR 狀態調和，已 MERGED 取回 merge commit 計入發版
+            merged="$(gh api -X PUT "repos/$REPO/pulls/$n/merge" -f merge_method=merge -f sha="$expect" --jq '.sha' 2>/dev/null)" || true
+            if [ -z "$merged" ]; then
+              pr_state="$(gh pr view "$n" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                merged="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail+="PR #$n merge response lost; recovered commit $merged; "
+              else
+                detail+="PR #$n merge rejected (head moved since snapshot); "; continue
+              fi
             fi
-            if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "CLEAN" ] || [ "$state" = "HAS_HOOKS" ] || [ "$state" = "UNBLOCKED" ]; }; then
-              break
-            fi
-            if (( SECONDS >= deadline )); then
-              detail="timed out waiting for PR #$pr checks (state=$state pending=$pending)"; exit 0
-            fi
-            sleep 30
+            last_pr="$n"; last_sha="$merged"; merged_count=$((merged_count+1))
+            detail+="merged approved PR #$n ($merged); "
           done
 
-          gh pr merge "$pr" -R "$REPO" --merge >/dev/null || { detail="merge of PR #$pr failed"; exit 0; }
-          sha="$(gh pr view "$pr" -R "$REPO" --json mergeCommit --jq '.mergeCommit.oid')"
-          result="released"; detail="merged PR #$pr ($sha); no deployment monitor for docs"
+          if [ "$merged_count" -eq 0 ]; then
+            result="no-changes"; detail="nothing merged — ${detail:-no eligible PRs}"; exit 0
+          fi
+          pr="$last_pr"; sha="$last_sha"
+          result="released"; deploy="not-applicable"
+          detail="merged $merged_count approved docs PR(s); $detail"
           exit 0
 
   report:
@@ -338,6 +522,7 @@ jobs:
     if: always()
     env:
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
     steps:
       - name: Send consolidated status report
         run: |
@@ -370,14 +555,18 @@ jobs:
           done
           if [ "$overall" = "success" ] && \
              [ "${{ needs.release-iac.outputs.result }}" != "released" ] && \
-             [ "${{ needs.release-frontend.outputs.result }}" != "released" ]; then
+             [ "${{ needs.release-frontend.outputs.result }}" != "released" ] && \
+             [ "${{ needs.release-docs.outputs.result }}" != "released" ]; then
             overall="nothing-to-ship"
           fi
 
-          subject="[AkaAka release $(date -u +%F)] ${overall}: weekly production release"
+          mode_tag=""
+          if [ "$RELEASE_MODE" = "dry-run" ]; then mode_tag="[DRY-RUN] "; fi
+
+          subject="${mode_tag}[AkaAka release $(date -u +%F)] ${overall}: weekly production release"
           run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           html="<html><body style='font-family:sans-serif'>"
-          html+="<h2>AkaAka Weekly Production Release — ${overall}</h2>"
+          html+="<h2>${mode_tag}AkaAka Weekly Production Release — ${overall}</h2>"
           html+="<p>Scheduled Friday 08:19 Asia/Taipei release. Run: <a href='${run_url}'>${run_url}</a></p>"
           html+="<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:14px'>"
           html+="<tr style='background:#f0f0f0'><th>Repo</th><th>Result</th><th>Deploy</th><th>PR</th><th>Merged SHA</th><th>Detail</th></tr>"
@@ -407,3 +596,54 @@ jobs:
             echo "|---|---|---|---|---|---|"
             printf '%s' "$rows" | sed 's/<td[^>]*>/| /g; s/<th[^>]*>/| /g; s/<tr[^>]*>//; s/<\/tr>//'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Persist release state checkpoint
+        # dry-run 為唯讀規劃，不得建立或覆寫 checkpoint（否則會清掉待 resume 的失敗部署紀錄）
+        if: ${{ always() && env.RELEASE_MODE != 'dry-run' }}
+        run: |
+          set -uo pipefail
+          REPO="${GITHUB_REPOSITORY}"
+          BRANCH="$RELEASE_STATE_BRANCH"
+          # 讀取既有 checkpoint：必須區分「檔案尚不存在（HTTP 404，可正常 bootstrap）」與
+          # 「API 錯誤／內容無法取得（狀態不可靠）」。後者直接跳過寫入——若以本次資料覆寫，
+          # 可能清掉待 resume 的失敗部署紀錄，讓未套用的 production migration 永久漏部署
+          prev_err="$(mktemp)"
+          prev_b64="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>"$prev_err")" || true
+          if [ -s "$prev_err" ] && ! grep -q 'HTTP 404' "$prev_err"; then
+            echo "::warning::cannot reliably read previous checkpoint ($(tr '\n' ' ' <"$prev_err")); skipping checkpoint write to preserve pending release state"
+            rm -f "$prev_err"
+            exit 0
+          fi
+          rm -f "$prev_err"
+          prev_json="$(printf '%s' "$prev_b64" | base64 -d 2>/dev/null || true)"
+
+          state="$(jq -n \
+            --arg ir "${{ needs.release-iac.outputs.result }}" --arg isha "${{ needs.release-iac.outputs.sha }}" --arg idep "${{ needs.release-iac.outputs.deploy }}" \
+            --arg fr "${{ needs.release-frontend.outputs.result }}" --arg fsha "${{ needs.release-frontend.outputs.sha }}" --arg fdep "${{ needs.release-frontend.outputs.deploy }}" \
+            --arg dr "${{ needs.release-docs.outputs.result }}" --arg dsha "${{ needs.release-docs.outputs.sha }}" --arg ddep "${{ needs.release-docs.outputs.deploy }}" \
+            '{iac:{result:$ir,sha:$isha,deploy:$idep}, frontend:{result:$fr,sha:$fsha,deploy:$fdep}, docs:{result:$dr,sha:$dsha,deploy:$ddep}}')"
+
+          # 無新部署事實的 stage（result 空／aborted，或本次沒有合併 SHA：暫時性 API 失敗、dry-run、no-changes）
+          # 不得覆寫 checkpoint——空資料會清掉待 resume 的失敗紀錄，後續 run 誤判無可續行部署而永久漏部署
+          if printf '%s' "$prev_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            state="$(printf '%s' "$state" | jq -c --argjson prev "$prev_json" '
+              .iac = (if ((.iac.result // "") == "" or .iac.result == "aborted" or (.iac.sha // "") == "") then ($prev.iac // .iac) else .iac end) |
+              .frontend = (if ((.frontend.result // "") == "" or .frontend.result == "aborted" or (.frontend.sha // "") == "") then ($prev.frontend // .frontend) else .frontend end) |
+              .docs = (if ((.docs.result // "") == "" or .docs.result == "aborted" or (.docs.sha // "") == "") then ($prev.docs // .docs) else .docs end)
+            ')"
+          fi
+
+          if ! gh api "repos/$REPO/branches/$BRANCH" >/dev/null 2>&1; then
+            main_sha="$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')"
+            gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$main_sha" >/dev/null || { echo "::warning::cannot create state branch $BRANCH"; exit 0; }
+          fi
+
+          file_sha="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.sha' 2>/dev/null || true)"
+          payload="$(jq -n --arg msg "chore(release): update weekly release state" --arg c "$(printf '%s' "$state" | base64 -w0)" --arg b "$BRANCH" --arg s "$file_sha" \
+            '{message:$msg, content:$c, branch:$b} + (if $s != "" then {sha:$s} else {} end)')"
+
+          if printf '%s' "$payload" | gh api -X PUT "repos/$REPO/contents/state.json" --input - >/dev/null 2>&1; then
+            echo "release state persisted to $BRANCH/state.json"
+          else
+            echo "::warning::failed to persist release state; resume semantics degrade on next rerun"
+          fi

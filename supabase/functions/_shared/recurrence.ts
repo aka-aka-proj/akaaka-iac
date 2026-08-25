@@ -37,11 +37,6 @@ export class RecurrenceSeriesTooLongError extends Error {
   }
 }
 
-// Legacy payloads (no `timezone`, required `count`, optional `until` alongside it)
-// stay valid until the revised frontend ships to production — flip this off then
-// (spec「部署相容期」, tracked in supabase/functions/DEPLOYMENT-NOTES.md).
-const LEGACY_PAYLOAD_COMPAT_ENABLED = true
-
 // Hard guards so generators always terminate even when callers bypass validation;
 // validated input always terminates earlier via the count/until/series-cap checks.
 const MAX_WEEK_STEPS = 5200
@@ -109,18 +104,24 @@ function timeZoneOffsetMs(instantMs: number, timeZone: string): number {
   return Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute, time.second, time.millisecond) - instantMs
 }
 
-// Local wall-clock components in `timeZone` → UTC instant. Re-reading the offset
-// at successive guesses makes DST transitions converge deterministically:
-// ambiguous times resolve to the earlier instant, gap times shift forward.
+// Local wall-clock components in `timeZone` → UTC instant. Re-reading the
+// offset at successive guesses converges deterministically for normal and
+// ambiguous (fall-back) times. A spring-forward GAP never converges — the
+// iteration oscillates between two instants — so detect the cycle and pick
+// the later one, placing the schedule after the transition (e.g. Berlin
+// 02:30 → 03:30 local).
 function zonedWallTimeToUtcMs(date: CalendarDate, time: WallTime, timeZone: string): number {
   const naive = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute, time.second, time.millisecond)
+  let previous = Number.NaN
   let utc = naive
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < 8; i += 1) {
     const next = naive - timeZoneOffsetMs(utc, timeZone)
-    if (next === utc) break
+    if (next === utc) return utc
+    if (i > 0 && next === previous) return Math.max(utc, next)
+    previous = utc
     utc = next
   }
-  return utc
+  return Math.max(previous, utc)
 }
 
 function addCalendarDays(date: CalendarDate, days: number): CalendarDate {
@@ -182,22 +183,17 @@ export function validateRecurrenceRule(rule: UnvalidatedRecurrenceRule): string 
     return 'until must be a valid timestamp'
   }
 
-  const newStylePayload = rule.timezone !== undefined && rule.timezone !== null
-  if (newStylePayload || !LEGACY_PAYLOAD_COMPAT_ENABLED) {
-    if (typeof rule.timezone !== 'string' || !isValidTimeZone(rule.timezone)) {
-      return 'timezone must be a valid IANA time zone name'
+  // Strict path for every payload since the compat period ended (spec「部署相容期」).
+  if (typeof rule.timezone !== 'string' || !isValidTimeZone(rule.timezone)) {
+    return 'timezone must be a valid IANA time zone name'
+  }
+  if ((rule.count !== undefined) === hasUntil) {
+    return 'provide either count or until, not both'
+  }
+  for (const key of Object.keys(rule)) {
+    if (!modeAllowedFields(rule).has(key)) {
+      return `field "${key}" is not allowed for ${rule.frequency} recurrence`
     }
-    if ((rule.count !== undefined) === hasUntil) {
-      return 'provide either count or until, not both'
-    }
-    for (const key of Object.keys(rule)) {
-      if (!modeAllowedFields(rule).has(key)) {
-        return `field "${key}" is not allowed for ${rule.frequency} recurrence`
-      }
-    }
-  } else if (rule.count === undefined) {
-    // Legacy contract: count is required, until optional alongside it.
-    return 'count must be an integer between 1 and 52'
   }
 
   if (rule.week_ordinal !== undefined && !(rule.frequency === 'monthly' && rule.monthly_by === 'weekday')) {
