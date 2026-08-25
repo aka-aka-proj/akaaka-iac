@@ -82,13 +82,15 @@ SELECT ok(
 -- Management RPCs must require private visibility（審查 P1 修復）
 -- ============================================================
 SELECT ok(
-  position('= ''private''' in pg_get_functiondef('public.ensure_event_share_token(uuid)'::regprocedure)) > 0,
-  'ensure refuses to mint tokens for non-private events'
+  position('= ''private''' in pg_get_functiondef('public.ensure_event_share_token(uuid)'::regprocedure)) > 0
+    AND position('publication_status = ''published''' in pg_get_functiondef('public.ensure_event_share_token(uuid)'::regprocedure)) > 0,
+  'ensure refuses non-private or unpublished events'
 );
 
 SELECT ok(
-  position('= ''private''' in pg_get_functiondef('public.rotate_event_share_token(uuid)'::regprocedure)) > 0,
-  'rotate refuses non-private events too'
+  position('= ''private''' in pg_get_functiondef('public.rotate_event_share_token(uuid)'::regprocedure)) > 0
+    AND position('publication_status = ''published''' in pg_get_functiondef('public.rotate_event_share_token(uuid)'::regprocedure)) > 0,
+  'rotate refuses non-private or unpublished events too'
 );
 
 -- ============================================================
