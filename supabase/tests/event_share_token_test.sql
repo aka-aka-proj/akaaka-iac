@@ -4,7 +4,7 @@ BEGIN;
 -- 結構性驗證：definer/search_path/grants/條件檢查/token 表存取封鎖/trigger。
 -- 行為測試（token 有效與否）依賴 auth session context，由 staging synthetic fixture 驗證。
 
-SELECT plan(25);
+SELECT plan(30);
 
 -- ============================================================
 -- SECURITY DEFINER + fixed search_path
@@ -155,6 +155,42 @@ SELECT ok(
     AND NOT has_table_privilege('authenticated', 'event_share_tokens', 'UPDATE')
     AND NOT has_table_privilege('authenticated', 'event_share_tokens', 'DELETE'),
   'authenticated has zero table privileges on event_share_tokens'
+);
+
+-- ============================================================
+-- Capacity resolver for token viewers（ADR-022）
+-- ============================================================
+SELECT ok(
+  (SELECT p.prosecdef FROM pg_proc p
+   WHERE p.oid = 'public.get_event_capacity_by_share_token(text)'::regprocedure),
+  'capacity-by-token resolver is security definer'
+);
+
+SELECT ok(
+  (SELECT p.proconfig @> ARRAY['search_path=public, extensions'] FROM pg_proc p
+   WHERE p.oid = 'public.get_event_capacity_by_share_token(text)'::regprocedure),
+  'capacity-by-token resolver fixes its search path'
+);
+
+SELECT ok(
+  has_function_privilege('anon', 'public.get_event_capacity_by_share_token(text)', 'EXECUTE')
+    AND has_function_privilege('authenticated', 'public.get_event_capacity_by_share_token(text)', 'EXECUTE'),
+  'capacity-by-token resolver is granted to anon and authenticated'
+);
+
+SELECT ok(
+  pg_get_function_result('public.get_event_capacity_by_share_token(text)'::regprocedure)
+    = 'TABLE(approved_registration_count bigint, capacity_external_guest_count bigint)',
+  'capacity-by-token resolver matches get_event_capacity output shape'
+);
+
+SELECT ok(
+  pg_get_functiondef('public.get_event_capacity_by_share_token(text)'::regprocedure)
+    LIKE '%event_share_tokens%'
+  AND position('= ''private''' in pg_get_functiondef('public.get_event_capacity_by_share_token(text)'::regprocedure)) > 0
+  AND pg_get_functiondef('public.get_event_capacity_by_share_token(text)'::regprocedure)
+    LIKE '%publication_status = ''published''%',
+  'capacity-by-token resolver rechecks token, publication, and private visibility'
 );
 
 -- ============================================================
