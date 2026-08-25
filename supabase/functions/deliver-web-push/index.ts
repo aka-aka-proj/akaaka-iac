@@ -240,13 +240,36 @@ async function processDelivery(
     // Atomic in SQL: fenced transition to `endpoint_invalid` first, then the
     // subscription delete in the same transaction. A stale worker gets false
     // back and leaves the subscription alone entirely.
-    const settled = await settleDelivery(
-      admin,
-      row,
-      "endpoint_invalid",
-      errorCode,
-    );
-    return settled ? "endpoint_invalid" : "skipped";
+    try {
+      const settled = await settleDelivery(
+        admin,
+        row,
+        "endpoint_invalid",
+        errorCode,
+      );
+      return settled ? "endpoint_invalid" : "skipped";
+    } catch {
+      // The settle RPC failed before committing (e.g. the delete hit a lock
+      // timeout or deadlock), so our lease still holds. Schedule bounded
+      // retries like the legacy path did — otherwise a persistently failing
+      // delete would re-claim and re-call the provider forever without ever
+      // reaching a terminal state.
+      if (row.attempts < MAX_ATTEMPTS) {
+        const nextAvailable = new Date(Date.parse(now) + retryDelayMs(row.attempts))
+          .toISOString();
+        const fenced = await fenceUpdate(admin, row, {
+          status: "pending",
+          available_at: nextAvailable,
+          last_error_code: "subscription_delete_failed",
+        });
+        return fenced ? "retryable" : "skipped";
+      }
+      const fenced = await fenceUpdate(admin, row, {
+        status: "dead_letter",
+        last_error_code: "subscription_delete_failed",
+      });
+      return fenced ? "dead_letter" : "skipped";
+    }
   }
 
   if (outcome === "retryable" && row.attempts < MAX_ATTEMPTS) {

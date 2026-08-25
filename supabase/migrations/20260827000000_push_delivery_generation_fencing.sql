@@ -332,7 +332,13 @@ BEGIN
     )
     ORDER BY d.available_at, d.created_at, d.id
     LIMIT p_limit
-    FOR UPDATE OF d SKIP LOCKED
+    -- Lock the subscription row too, in the same order the ownership move
+    -- takes its locks: otherwise a concurrent move could pass its active-lease
+    -- re-check before this claim's processing flip becomes visible, commit
+    -- afterwards, and leave a worker sending with pre-move state across the
+    -- validate→send boundary. SKIP LOCKED makes a move-in-progress simply
+    -- exclude those candidates from this batch.
+    FOR UPDATE OF d, ps SKIP LOCKED
   ), claimed AS (
     UPDATE public.notification_push_deliveries d
     SET status = 'processing',
