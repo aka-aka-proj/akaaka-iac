@@ -328,7 +328,17 @@ jobs:
             patch="$(jq -r --arg f "$fname" '[.[] | select(.filename == $f)][0].patch // ""' /tmp/pr_files_flat.json)"
             case "$fname" in
               supabase/migrations/*)
-                hits="$(printf '%s' "$patch" | grep '^+' | grep -Ei "$mig_pat" || true)"
+                # 兩類新增行屬例行防護而非相容性破壞，偵測前先剝除：
+                # 1) REVOKE ... ON FUNCTION ... FROM PUBLIC——函式 EXECUTE 權限
+                #    硬化（歷來 migration 標準配管），不改變任何資料可及性；
+                # 2) DROP ... IF EXISTS——冪等守衛式清理，目標物件本就可能
+                #    不存在，不構成對既有保證的撤回。
+                plus_lines="$(printf '%s' "$patch" | grep '^+' || true)"
+                contract_lines="$(printf '%s\n' "$plus_lines" \
+                  | grep -Ev 'REVOKE[^;]*ON[[:space:]]+FUNCTION' \
+                  | grep -Ev 'DROP[[:space:]]+(TABLE|COLUMN|CONSTRAINT|POLICY|FUNCTION|SCHEMA)[[:space:]]+IF[[:space:]]+EXISTS' \
+                  || true)"
+                hits="$(printf '%s\n' "$contract_lines" | grep -Ei "$mig_pat" || true)"
                 if [ -n "$hits" ]; then detected="migrations:$fname"; fi
                 ;;
               supabase/functions/*)
