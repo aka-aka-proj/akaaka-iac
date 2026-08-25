@@ -199,7 +199,7 @@ jobs:
               if [ -n "$psha" ] && [ "$pdep" != "success" ] && [ "$pdep" != "no-deploy" ]; then
                 new_sha="$sha"; sha="$psha"; deploy="failed"
                 detail="merged PR #$pr ($new_sha) with no CD trigger paths; previous deployment of $psha still $pdep, keeping failed state"
-                exit 0
+                exit 1
               fi
               deploy="no-deploy"; detail="merged PR #$pr ($sha); no iac-cd.yml trigger paths changed"; exit 0
             fi
@@ -209,7 +209,7 @@ jobs:
             # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過；
             # commit 可能超過單頁 30 檔，必須分頁取得完整檔案清單再判斷觸發路徑
             if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --paginate --jq '.files[].filename')"; then
-              deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 0
+              deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 1
             fi
             will_deploy=0
             if printf '%s' "$commit_files" | touches_cd_paths; then will_deploy=1; fi
@@ -221,8 +221,9 @@ jobs:
           # 監看 main 上的 iac-cd.yml run 直到結束
           deadline=$((SECONDS + 2400))
           while :; do
-            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --limit 10 --json databaseId,headSha,status,conclusion)"
-            run="$(printf '%s' "$run_json" | jq -r "[.[] | select(.headSha == \"$sha\")][0].databaseId // \"\"")"
+            # 以 commit SHA 伺服器端篩選，避免較新 run 超過 limit 後永遠找不到目標 run（含 operator 的 rerun attempt）
+            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --commit "$sha" --limit 30 --json databaseId,status,conclusion)"
+            run="$(printf '%s' "$run_json" | jq -r '[.[]][0].databaseId // ""')"
             if [ -n "$run" ]; then
               st="$(gh run view "$run" -R "$REPO" --json status,conclusion)"
               status="$(printf '%s' "$st" | jq -r '.status')"; conc="$(printf '%s' "$st" | jq -r '.conclusion')"
@@ -234,13 +235,15 @@ jobs:
                   deploy="failed"
                   detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run); awaiting manual remediation: rerun that run or revert/hotfix — orchestrator never auto-retries (spec 001)"
                 fi
+                # 嚴格順序：IaC 部署失敗／逾時讓 stage 失敗，GitHub Actions skip 下游 stage
+                case "$deploy" in failed|timeout) exit 1 ;; esac
                 exit 0
               fi
             elif (( SECONDS > 600 )); then
-              deploy="failed"; detail="iac-cd.yml run for $sha not found within 10 minutes"; exit 0
+              deploy="failed"; detail="iac-cd.yml run for $sha not found within 10 minutes"; exit 1
             fi
             if (( SECONDS >= deadline )); then
-              deploy="timeout"; detail="timed out watching iac-cd.yml for $sha"; exit 0
+              deploy="timeout"; detail="timed out watching iac-cd.yml for $sha"; exit 1
             fi
             sleep 30
           done
