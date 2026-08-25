@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(45);
+SELECT plan(49);
 
 -- Structural contracts -------------------------------------------------------
 
@@ -353,6 +353,37 @@ SELECT is(
   'deferred-then-completed move still quarantines previous-owner queue'
 );
 
+-- Expand-window duplicate convergence ----------------------------------------
+
+RESET ROLE;
+INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth, updated_at)
+VALUES
+  ('00000000-0000-4000-8000-000000000301', 'https://push.local/e-dup', 'p256dh-dup', 'auth-dup', now() - interval '1 hour'),
+  ('00000000-0000-4000-8000-000000000302', 'https://push.local/e-dup', 'p256dh-other', 'auth-other', now());
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000302', true);
+SELECT lives_ok(
+  $$SELECT public.subscribe_push_subscription(
+    'https://push.local/e-dup', 'p256dh-dup', 'auth-dup', 'UA-B'
+  )$$,
+  'possession-matched takeover converges a legacy duplicate pair'
+);
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.push_subscriptions WHERE endpoint = 'https://push.local/e-dup'),
+  1,
+  'duplicate endpoint rows collapse into exactly one binding'
+);
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.push_subscriptions
+   WHERE endpoint = 'https://push.local/e-dup'
+     AND profile_id = '00000000-0000-4000-8000-000000000302'),
+  1,
+  'the surviving binding belongs to the possessing profile'
+);
+
 -- Claim path contracts --------------------------------------------------------
 
 SET LOCAL ROLE authenticated;
@@ -427,6 +458,16 @@ WHERE ps.endpoint = 'https://push.local/stale-but-delivered'
 INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth, updated_at)
 VALUES ('00000000-0000-4000-8000-000000000301', 'https://push.local/fully-stale', 'p', 'a', now() - interval '200 days');
 
+INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth, updated_at)
+VALUES ('00000000-0000-4000-8000-000000000301', 'https://push.local/stale-in-flight', 'p', 'a', now() - interval '200 days');
+
+INSERT INTO public.notification_push_deliveries (notification_id, push_subscription_id, idempotency_key, status, claimed_at)
+SELECT n.id, ps.id, 'hygiene-in-flight-fixture', 'processing', timezone('utc', now())
+FROM public.notifications n
+JOIN public.push_subscriptions ps ON ps.endpoint = 'https://push.local/stale-in-flight'
+WHERE n.recipient_profile_id = '00000000-0000-4000-8000-000000000301'
+  AND n.actor_profile_id = '00000000-0000-4000-8000-000000000305';
+
 SET LOCAL ROLE service_role;
 SELECT is(
   public.cleanup_stale_push_subscriptions(90),
@@ -439,6 +480,13 @@ SELECT ok(
     SELECT 1 FROM public.push_subscriptions WHERE endpoint = 'https://push.local/stale-but-delivered'
   ),
   'recently delivered subscriptions survive even with an untouched updated_at'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM public.push_subscriptions WHERE endpoint = 'https://push.local/stale-in-flight'
+  ),
+  'subscriptions holding an unexpired send lease are never deleted mid-send'
 );
 
 SELECT ok(
