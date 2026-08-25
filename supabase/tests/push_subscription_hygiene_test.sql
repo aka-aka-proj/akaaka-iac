@@ -47,21 +47,21 @@ SELECT ok(
 SELECT ok(
   (SELECT p.prosecdef
    FROM pg_proc p
-   WHERE p.oid = 'public.subscribe_push_subscription(text,text,text,text)'::regprocedure),
+   WHERE p.oid = 'public.subscribe_push_subscription(text,text,text,text,text)'::regprocedure),
   'subscribe RPC is security definer'
 );
 
 SELECT ok(
   (SELECT p.proconfig @> ARRAY['search_path=public, extensions']
    FROM pg_proc p
-   WHERE p.oid = 'public.subscribe_push_subscription(text,text,text,text)'::regprocedure),
+   WHERE p.oid = 'public.subscribe_push_subscription(text,text,text,text,text)'::regprocedure),
   'subscribe RPC fixes its search path'
 );
 
 SELECT ok(
-  has_function_privilege('authenticated', 'public.subscribe_push_subscription(text,text,text,text)', 'EXECUTE')
-    AND NOT has_function_privilege('anon', 'public.subscribe_push_subscription(text,text,text,text)', 'EXECUTE')
-    AND NOT has_function_privilege('service_role', 'public.subscribe_push_subscription(text,text,text,text)', 'EXECUTE'),
+  has_function_privilege('authenticated', 'public.subscribe_push_subscription(text,text,text,text,text)', 'EXECUTE')
+    AND NOT has_function_privilege('anon', 'public.subscribe_push_subscription(text,text,text,text,text)', 'EXECUTE')
+    AND NOT has_function_privilege('service_role', 'public.subscribe_push_subscription(text,text,text,text,text)', 'EXECUTE'),
   'only authenticated clients may execute the subscribe RPC'
 );
 
