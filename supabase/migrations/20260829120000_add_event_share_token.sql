@@ -132,6 +132,54 @@ COMMENT ON FUNCTION public.get_event_by_share_token(TEXT) IS
   'Returns the published private event matching a share token (ADR-022); empty result on any mismatch. Never exposes registration, invitation, or guest data.';
 
 -- ============================================================
+-- Step 3b: Capacity aggregate for token viewers
+-- 與 get_event_capacity 相同形態，改以 token gate 授權，
+-- 使 token viewer 的詳情頁名額顯示一致（ADR-022）。
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.get_event_capacity_by_share_token(p_token TEXT)
+RETURNS TABLE (
+  approved_registration_count BIGINT,
+  capacity_external_guest_count BIGINT
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+  SELECT
+    (
+      SELECT COUNT(*)
+      FROM public.event_registrations er
+      WHERE er.event_id = e.id
+        AND er.status = 'approved'
+    ) AS approved_registration_count,
+    (
+      SELECT COUNT(*)
+      FROM public.event_external_guests eg
+      WHERE eg.event_id = e.id
+        AND eg.count_towards_capacity = TRUE
+    ) AS capacity_external_guest_count
+  FROM public.event_share_tokens est
+  JOIN public.events e ON e.id = est.event_id
+  WHERE est.token = p_token
+    AND p_token IS NOT NULL
+    AND e.lifecycle_status <> 'draft'
+    AND e.publication_status = 'published'
+    AND COALESCE(e.visibility_settings ->> 'type', 'public') = 'private'
+    AND (
+      (SELECT auth.uid()) IS NULL
+      OR NOT EXISTS (
+        SELECT 1
+        FROM public.blocks b
+        WHERE (b.blocker_id = (SELECT auth.uid()) AND b.blocked_id = e.creator_id)
+           OR (b.blocker_id = e.creator_id AND b.blocked_id = (SELECT auth.uid()))
+      )
+    );
+$$;
+
+COMMENT ON FUNCTION public.get_event_capacity_by_share_token(TEXT) IS
+  'Returns the same capacity aggregates as get_event_capacity for a valid private-event share token (ADR-022); counts only, never participant data.';
+
+-- ============================================================
 -- Step 4: Grants
 -- ============================================================
 REVOKE ALL ON FUNCTION public.ensure_event_share_token(UUID) FROM PUBLIC;
@@ -142,6 +190,9 @@ GRANT EXECUTE ON FUNCTION public.rotate_event_share_token(UUID) TO authenticated
 
 REVOKE ALL ON FUNCTION public.get_event_by_share_token(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_event_by_share_token(TEXT) TO anon, authenticated;
+
+REVOKE ALL ON FUNCTION public.get_event_capacity_by_share_token(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_event_capacity_by_share_token(TEXT) TO anon, authenticated;
 
 -- ============================================================
 -- Step 5: Visibility-change hygiene
