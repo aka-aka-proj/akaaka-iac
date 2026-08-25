@@ -221,6 +221,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
     env:
       # 同 repo 的 body/files 讀取用 github.token 即可；AKA_REPO_TOKEN 僅在
       # 宣告引用 akaaka-docs PR 時（跨 repo 合併狀態驗證）才需要，缺漏時於
