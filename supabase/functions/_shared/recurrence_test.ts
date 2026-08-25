@@ -135,27 +135,27 @@ Deno.test('V8 monthly weekday skips a candidate identical to the base event', ()
 
 Deno.test('V9 validation rejects invalid monthly weekday rules', () => {
   assertEquals(
-    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'weekday', days: ['Wed'], interval: 1, count: 2 }),
+    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'weekday', days: ['Wed'], interval: 1, count: 2, timezone: 'UTC' }),
     'week_ordinal must be an integer between 1 and 5',
   )
   assertEquals(
-    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'weekday', week_ordinal: 6, days: ['Wed'], interval: 1, count: 2 }),
+    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'weekday', week_ordinal: 6, days: ['Wed'], interval: 1, count: 2, timezone: 'UTC' }),
     'week_ordinal must be an integer between 1 and 5',
   )
   assertEquals(
-    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'weekday', week_ordinal: 2, interval: 1, count: 2 }),
+    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'weekday', week_ordinal: 2, interval: 1, count: 2, timezone: 'UTC' }),
     'days must contain at least one weekday when monthly_by is "weekday"',
   )
   assertEquals(
-    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'date', week_ordinal: 2, interval: 1, count: 2 }),
-    'week_ordinal is only allowed when monthly_by is "weekday"',
+    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'date', week_ordinal: 2, interval: 1, count: 2, timezone: 'UTC' }),
+    'field "week_ordinal" is not allowed for monthly recurrence',
   )
   assertEquals(
-    validateRecurrenceRule({ frequency: 'weekly', monthly_by: 'weekday', week_ordinal: 2, days: ['Mon'], interval: 1, count: 2 }),
-    'monthly_by and week_ordinal are only allowed for monthly frequency',
+    validateRecurrenceRule({ frequency: 'weekly', monthly_by: 'weekday', week_ordinal: 2, days: ['Mon'], interval: 1, count: 2, timezone: 'UTC' }),
+    'field "monthly_by" is not allowed for weekly recurrence',
   )
   assertEquals(
-    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'yearly', interval: 1, count: 2 }),
+    validateRecurrenceRule({ frequency: 'monthly', monthly_by: 'yearly', interval: 1, count: 2, timezone: 'UTC' }),
     'monthly_by must be "date" or "weekday"',
   )
 })
@@ -292,7 +292,7 @@ Deno.test('V18 new-style rules reject fields outside their mode whitelist', () =
   )
 })
 
-Deno.test('V19 timezone must be a valid IANA name on new-style payloads; legacy payloads stay valid', () => {
+Deno.test('V19 timezone must be a valid IANA name on every payload', () => {
   assertEquals(
     validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 2, timezone: 'Mars/Olympus' }),
     'timezone must be a valid IANA time zone name',
@@ -300,10 +300,6 @@ Deno.test('V19 timezone must be a valid IANA name on new-style payloads; legacy 
   assertEquals(
     validateRecurrenceRule(ruleWithExtraFields({ frequency: 'weekly', interval: 1, count: 2, timezone: 123 })),
     'timezone must be a valid IANA time zone name',
-  )
-  assertEquals(
-    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 4, until: '2026-09-30T00:00:00.000Z' }),
-    null,
   )
 })
 
@@ -331,19 +327,13 @@ Deno.test('V22 DST spring-forward gap resolves to the instant after the transiti
   ])
 })
 
-Deno.test('V20 legacy count and until coexist: filter by until first, then truncate by count', () => {
-  const base = new Date('2026-08-10T12:00:00.000Z')
-  const boundedByUntil = generateRecurringDates(base, {
-    frequency: 'weekly', interval: 1, count: 4, until: '2026-08-24T12:00:00.000Z',
-  })
-  assertEquals(boundedByUntil.map((date) => date.toISOString()), [
-    '2026-08-17T12:00:00.000Z',
-    '2026-08-24T12:00:00.000Z',
-  ])
-  const truncatedByCount = generateRecurringDates(base, {
-    frequency: 'weekly', interval: 1, count: 2, until: '2027-01-01T00:00:00.000Z',
-  })
-  assertEquals(truncatedByCount.map((date) => date.toISOString()), [
-    '2026-08-17T12:00:00.000Z',
-  ])
+Deno.test('V20 legacy payload shapes are rejected once the compat period ends', () => {
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 4 }),
+    'timezone must be a valid IANA time zone name',
+  )
+  assertEquals(
+    validateRecurrenceRule({ frequency: 'weekly', interval: 1, count: 2, until: '2026-09-30T00:00:00.000Z' }),
+    'timezone must be a valid IANA time zone name',
+  )
 })

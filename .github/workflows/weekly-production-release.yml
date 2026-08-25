@@ -177,7 +177,18 @@ jobs:
             if printf '%s' "$cd_files" | touches_cd_paths; then will_deploy=1; fi
 
             # CAS merge：以 expected-head sha 原子拒絕 head 已變動的合併
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || { detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0; }
+            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控；
+            # 否則視為 rejected（head moved / API 錯誤），本次無新部署事實
+            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
+            if [ -z "$sha" ]; then
+              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
+              else
+                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
+              fi
+            fi
             result="released"
 
             if [ "$will_deploy" -eq 0 ]; then
@@ -188,16 +199,17 @@ jobs:
               if [ -n "$psha" ] && [ "$pdep" != "success" ] && [ "$pdep" != "no-deploy" ]; then
                 new_sha="$sha"; sha="$psha"; deploy="failed"
                 detail="merged PR #$pr ($new_sha) with no CD trigger paths; previous deployment of $psha still $pdep, keeping failed state"
-                exit 0
+                exit 1
               fi
               deploy="no-deploy"; detail="merged PR #$pr ($sha); no iac-cd.yml trigger paths changed"; exit 0
             fi
           fi
 
           if [ "$resume_watch" -eq 1 ]; then
-            # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過
-            if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --jq '.files[].filename')"; then
-              deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 0
+            # API 失敗不得視為「無 CD 觸發路徑」：保留 failed 狀態，下次 run 才會重新驗證而非永久跳過；
+            # commit 可能超過單頁 30 檔，必須分頁取得完整檔案清單再判斷觸發路徑
+            if ! commit_files="$(gh api "repos/$REPO/commits/$sha" --paginate --jq '.files[].filename')"; then
+              deploy="failed"; detail="resume: commit files API failed for $sha; keeping failed state for next-run retry"; exit 1
             fi
             will_deploy=0
             if printf '%s' "$commit_files" | touches_cd_paths; then will_deploy=1; fi
@@ -209,8 +221,9 @@ jobs:
           # 監看 main 上的 iac-cd.yml run 直到結束
           deadline=$((SECONDS + 2400))
           while :; do
-            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --limit 10 --json databaseId,headSha,status,conclusion)"
-            run="$(printf '%s' "$run_json" | jq -r "[.[] | select(.headSha == \"$sha\")][0].databaseId // \"\"")"
+            # 以 commit SHA 伺服器端篩選，避免較新 run 超過 limit 後永遠找不到目標 run（含 operator 的 rerun attempt）
+            run_json="$(gh run list -R "$REPO" --workflow "$CD_WORKFLOW" --branch main --commit "$sha" --limit 30 --json databaseId,status,conclusion)"
+            run="$(printf '%s' "$run_json" | jq -r '[.[]][0].databaseId // ""')"
             if [ -n "$run" ]; then
               st="$(gh run view "$run" -R "$REPO" --json status,conclusion)"
               status="$(printf '%s' "$st" | jq -r '.status')"; conc="$(printf '%s' "$st" | jq -r '.conclusion')"
@@ -220,15 +233,17 @@ jobs:
                   detail="Supabase production deploy succeeded (run https://github.com/$REPO/actions/runs/$run)"
                 else
                   deploy="failed"
-                  detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run)"
+                  detail="Supabase production deploy concluded '$conc' (run https://github.com/$REPO/actions/runs/$run); awaiting manual remediation: rerun that run or revert/hotfix — orchestrator never auto-retries (spec 001)"
                 fi
+                # 嚴格順序：IaC 部署失敗／逾時讓 stage 失敗，GitHub Actions skip 下游 stage
+                case "$deploy" in failed|timeout) exit 1 ;; esac
                 exit 0
               fi
             elif (( SECONDS > 600 )); then
-              deploy="failed"; detail="iac-cd.yml run for $sha not found within 10 minutes"; exit 0
+              deploy="failed"; detail="iac-cd.yml run for $sha not found within 10 minutes"; exit 1
             fi
             if (( SECONDS >= deadline )); then
-              deploy="timeout"; detail="timed out watching iac-cd.yml for $sha"; exit 0
+              deploy="timeout"; detail="timed out watching iac-cd.yml for $sha"; exit 1
             fi
             sleep 30
           done
@@ -325,7 +340,17 @@ jobs:
               result="aborted"; detail="preview head moved during run ($PINNED_SHA -> $cur_head); stage aborted"; exit 1
             fi
 
-            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || { detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0; }
+            # 回應遺失 ≠ 合併失敗：CAS PUT 出錯時以 PR 狀態調和——已 MERGED 就取回 merge commit 續行監控
+            sha="$(gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=merge -f sha="$cur_head" --jq '.sha')" || true
+            if [ -z "$sha" ]; then
+              pr_state="$(gh pr view "$pr" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                sha="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail="merge of PR #$pr accepted but response was lost; recovered merge commit $sha"
+              else
+                detail="merge of PR #$pr rejected (head moved or state changed since manifest check)"; exit 0
+              fi
+            fi
             result="released"
           fi
 
@@ -379,7 +404,13 @@ jobs:
               detail="$detail; SPA route smoke check passed"
             fi
           fi
-          exit 0
+          # 部署失敗／逾時必須讓 stage 失敗，GitHub Actions 才會 skip 下游 stage，落實「第一個失敗即中止」的發佈順序
+          case "$deploy" in
+            failed|timeout)
+              exit 1 ;;
+            *)
+              exit 0 ;;
+          esac
 
   release-docs:
     name: Release akaaka-docs
@@ -425,8 +456,17 @@ jobs:
           for row in "${rows[@]}"; do
             n="${row%%$'\t'*}"; expect="${row##*$'\t'}"
 
-            # 僅計人類核准（排除 Bot/App reviewer），落實「人工 APPROVED 才可合併」契約
-            approvals="$(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not))] | length')"
+            # 僅計「目前實際具寫入權限」帳號的 APPROVED：association（MEMBER/COLLABORATOR）不保證現行權限，
+            # 須以 collaborators/{login}/permission 查得 write/admin 才算數；查詢失敗時 fail-closed 不計，
+            # 落實「具寫入權限者 APPROVED 才可合併」契約
+            approvals=0
+            while IFS= read -r reviewer; do
+              [ -z "$reviewer" ] && continue
+              perm="$(gh api "repos/$REPO/collaborators/$reviewer/permission" --jq '.permission_name // .permission' 2>/dev/null || true)"
+              case "$perm" in
+                admin|write) approvals=$((approvals+1)) ;;
+              esac
+            done < <(gh pr view "$n" -R "$REPO" --json latestReviews --jq '[.latestReviews[]? | select(.state == "APPROVED") | select(((.author.__typename // "User") != "Bot") and (((.author.login // "") | endswith("[bot]")) | not)) | .author.login] | unique | .[]')
             if [ "${approvals:-0}" -eq 0 ]; then
               detail+="PR #$n skipped (awaiting human approval); "
               continue
@@ -451,7 +491,17 @@ jobs:
             done
             [ "$ok" -eq 1 ] || continue
 
-            merged="$(gh api -X PUT "repos/$REPO/pulls/$n/merge" -f merge_method=merge -f sha="$expect" --jq '.sha' 2>/dev/null)" || { detail+="PR #$n merge rejected (head moved since snapshot); "; continue; }
+            # 回應遺失 ≠ 合併失敗：以 PR 狀態調和，已 MERGED 取回 merge commit 計入發版
+            merged="$(gh api -X PUT "repos/$REPO/pulls/$n/merge" -f merge_method=merge -f sha="$expect" --jq '.sha' 2>/dev/null)" || true
+            if [ -z "$merged" ]; then
+              pr_state="$(gh pr view "$n" -R "$REPO" --json state,mergeCommit --jq '.state + " " + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+              if [ "$(printf '%s' "$pr_state" | cut -d' ' -f1)" = "MERGED" ] && [ -n "$(printf '%s' "$pr_state" | cut -d' ' -f2)" ]; then
+                merged="$(printf '%s' "$pr_state" | cut -d' ' -f2)"
+                detail+="PR #$n merge response lost; recovered commit $merged; "
+              else
+                detail+="PR #$n merge rejected (head moved since snapshot); "; continue
+              fi
+            fi
             last_pr="$n"; last_sha="$merged"; merged_count=$((merged_count+1))
             detail+="merged approved PR #$n ($merged); "
           done
@@ -505,7 +555,8 @@ jobs:
           done
           if [ "$overall" = "success" ] && \
              [ "${{ needs.release-iac.outputs.result }}" != "released" ] && \
-             [ "${{ needs.release-frontend.outputs.result }}" != "released" ]; then
+             [ "${{ needs.release-frontend.outputs.result }}" != "released" ] && \
+             [ "${{ needs.release-docs.outputs.result }}" != "released" ]; then
             overall="nothing-to-ship"
           fi
 
@@ -553,7 +604,18 @@ jobs:
           set -uo pipefail
           REPO="${GITHUB_REPOSITORY}"
           BRANCH="$RELEASE_STATE_BRANCH"
-          prev_json="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
+          # 讀取既有 checkpoint：必須區分「檔案尚不存在（HTTP 404，可正常 bootstrap）」與
+          # 「API 錯誤／內容無法取得（狀態不可靠）」。後者直接跳過寫入——若以本次資料覆寫，
+          # 可能清掉待 resume 的失敗部署紀錄，讓未套用的 production migration 永久漏部署
+          prev_err="$(mktemp)"
+          prev_b64="$(gh api "repos/$REPO/contents/state.json?ref=$BRANCH" --jq '.content' 2>"$prev_err")" || true
+          if [ -s "$prev_err" ] && ! grep -q 'HTTP 404' "$prev_err"; then
+            echo "::warning::cannot reliably read previous checkpoint ($(tr '\n' ' ' <"$prev_err")); skipping checkpoint write to preserve pending release state"
+            rm -f "$prev_err"
+            exit 0
+          fi
+          rm -f "$prev_err"
+          prev_json="$(printf '%s' "$prev_b64" | base64 -d 2>/dev/null || true)"
 
           state="$(jq -n \
             --arg ir "${{ needs.release-iac.outputs.result }}" --arg isha "${{ needs.release-iac.outputs.sha }}" --arg idep "${{ needs.release-iac.outputs.deploy }}" \
@@ -561,12 +623,13 @@ jobs:
             --arg dr "${{ needs.release-docs.outputs.result }}" --arg dsha "${{ needs.release-docs.outputs.sha }}" --arg ddep "${{ needs.release-docs.outputs.deploy }}" \
             '{iac:{result:$ir,sha:$isha,deploy:$idep}, frontend:{result:$fr,sha:$fsha,deploy:$fdep}, docs:{result:$dr,sha:$dsha,deploy:$ddep}}')"
 
-          # skipped/abort 的 stage 本次無新事實：保留既有 checkpoint，以免清掉待 resume 的失敗紀錄
+          # 無新部署事實的 stage（result 空／aborted，或本次沒有合併 SHA：暫時性 API 失敗、dry-run、no-changes）
+          # 不得覆寫 checkpoint——空資料會清掉待 resume 的失敗紀錄，後續 run 誤判無可續行部署而永久漏部署
           if printf '%s' "$prev_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
             state="$(printf '%s' "$state" | jq -c --argjson prev "$prev_json" '
-              .iac = (if ((.iac.result // "") == "" or .iac.result == "aborted") then ($prev.iac // .iac) else .iac end) |
-              .frontend = (if ((.frontend.result // "") == "" or .frontend.result == "aborted") then ($prev.frontend // .frontend) else .frontend end) |
-              .docs = (if ((.docs.result // "") == "" or .docs.result == "aborted") then ($prev.docs // .docs) else .docs end)
+              .iac = (if ((.iac.result // "") == "" or .iac.result == "aborted" or (.iac.sha // "") == "") then ($prev.iac // .iac) else .iac end) |
+              .frontend = (if ((.frontend.result // "") == "" or .frontend.result == "aborted" or (.frontend.sha // "") == "") then ($prev.frontend // .frontend) else .frontend end) |
+              .docs = (if ((.docs.result // "") == "" or .docs.result == "aborted" or (.docs.sha // "") == "") then ($prev.docs // .docs) else .docs end)
             ')"
           fi
 
