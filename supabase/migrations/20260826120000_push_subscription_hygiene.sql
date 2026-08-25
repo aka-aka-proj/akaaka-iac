@@ -92,12 +92,17 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended(trim(p_endpoint), 0));
 
   -- The expand window legitimately allows one row per legacy profile for the
-  -- same endpoint, so lock ALL of them (deterministic order) and converge:
-  -- the caller's own row wins as refresh target, else the newest row whose
-  -- key material matches the supplied subscription proves possession and
-  -- becomes the transfer target; everything else is a stale duplicate whose
-  -- queued work is quarantined and whose binding is collapsed.
+  -- same endpoint. Selection is strictly prioritized: the caller's OWN row
+  -- always wins the target slot regardless of recency (a newer possession-
+  -- matched foreign row must never displace it, otherwise the later ownership
+  -- update collides with the still-present own row); otherwise the newest row
+  -- whose key material matches proves possession and becomes the transfer
+  -- target. Rows that are neither get quarantined and collapsed — but only
+  -- possession-matched extras or the caller's own extras; a foreign row whose
+  -- keys do NOT match stays untouched, because deleting it without holding
+  -- its keys would let anyone nuke another profile's live binding.
   v_target_id := NULL;
+  v_target_owner := NULL;
   v_purge := ARRAY[]::UUID[];
   v_seen := 0;
 
@@ -110,17 +115,26 @@ BEGIN
   LOOP
     v_seen := v_seen + 1;
 
-    IF v_target_id IS NOT NULL THEN
-      v_purge := array_append(v_purge, r.id);
-    ELSIF r.profile_id = v_profile_id THEN
+    IF r.profile_id = v_profile_id THEN
+      -- Own row always displaces a previously picked possession-matched
+      -- foreign candidate; the displaced row itself proved possession via
+      -- the supplied keys, so collapsing it stays legal.
+      IF v_target_id IS NOT NULL THEN
+        v_purge := array_append(v_purge, v_target_id);
+      END IF;
       v_target_id := r.id;
       v_target_owner := r.profile_id;
     ELSIF r.p256dh = trim(p_p256dh) AND r.auth = trim(p_auth) THEN
-      v_target_id := r.id;
-      v_target_owner := r.profile_id;
-    ELSE
-      v_purge := array_append(v_purge, r.id);
+      IF v_target_id IS NULL THEN
+        v_target_id := r.id;
+        v_target_owner := r.profile_id;
+      ELSE
+        v_purge := array_append(v_purge, r.id);
+      END IF;
     END IF;
+    -- Foreign rows whose keys do not match are left completely untouched:
+    -- deleting them without holding their key material would let any
+    -- authenticated caller destroy another profile's live binding.
   END LOOP;
 
   IF v_seen = 0 THEN
@@ -138,6 +152,11 @@ BEGIN
       trim(p_auth),
       p_user_agent
     )
+    ON CONFLICT (profile_id, endpoint) DO UPDATE
+    SET p256dh = EXCLUDED.p256dh,
+        auth = EXCLUDED.auth,
+        user_agent = EXCLUDED.user_agent,
+        updated_at = timezone('utc', now())
     RETURNING id INTO v_subscription_id;
     RETURN v_subscription_id;
   END IF;
@@ -176,22 +195,24 @@ BEGIN
   -- exists inside the real browser subscription, so "knowing the endpoint"
   -- must never be enough to take it over.
   --
-  -- Possession proven. Serialize against the claim path on the delivery rows
-  -- themselves (the same rows claim locks via FOR UPDATE), then defer while
-  -- an unexpired send lease holds the endpoint: this makes "owner check ->
-  -- provider send" and "ownership move" mutually exclusive at the lease
-  -- boundary regardless of arrival order. Clients retry naturally.
+  -- Serialize against BOTH the claim path and the fan-out enqueue on every
+  -- delivery row of the target and of every collapsed duplicate: taking the
+  -- same row locks claim uses (FOR UPDATE) blocks claim mid-flight, and the
+  -- enqueue trigger now also locks the subscription row before inserting, so
+  -- no phantom delivery can appear after this scan. Then defer while any
+  -- unexpired send lease — target or purge — still has a worker mid-send.
   PERFORM 1
     FROM public.notification_push_deliveries d
    WHERE d.push_subscription_id = v_target_id
-     AND d.status IN ('pending', 'processing')
+      OR d.push_subscription_id = ANY(v_purge)
     ORDER BY d.id
        FOR UPDATE;
 
   IF EXISTS (
     SELECT 1
       FROM public.notification_push_deliveries d
-     WHERE d.push_subscription_id = v_target_id
+     WHERE (d.push_subscription_id = v_target_id
+            OR d.push_subscription_id = ANY(v_purge))
        AND d.status = 'processing'
        AND d.claimed_at >= timezone('utc', now()) - interval '5 minutes'
   ) THEN
@@ -263,6 +284,18 @@ BEGIN
 
   v_cutoff := timezone('utc', now()) - (p_stale_days * interval '1 day');
 
+  -- Serialize against concurrent claim transitions first: lock every
+  -- candidate's still-live delivery rows so an uncommitted pending→processing
+  -- flip becomes visible to the predicate evaluation that follows, instead of
+  -- racing past it and deleting a subscription mid-send.
+  PERFORM 1
+    FROM public.notification_push_deliveries d
+    JOIN public.push_subscriptions ps ON ps.id = d.push_subscription_id
+   WHERE ps.updated_at < v_cutoff
+     AND d.status IN ('pending', 'processing')
+    ORDER BY d.id
+       FOR UPDATE OF d;
+
   WITH deleted AS (
     DELETE FROM public.push_subscriptions ps
     WHERE ps.updated_at < v_cutoff
@@ -294,6 +327,38 @@ $$;
 
 REVOKE ALL ON FUNCTION public.cleanup_stale_push_subscriptions(INTEGER) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.cleanup_stale_push_subscriptions(INTEGER) TO service_role;
+
+-- 6b) Phantom-insert barrier for ownership moves: the enqueue trigger now
+-- takes the subscription row lock (same row the subscribe RPC holds) before
+-- fanning out, so a notification created during an in-flight move can never
+-- slip past the move's lease re-check as an unseen delivery.
+CREATE OR REPLACE FUNCTION public.enqueue_notification_push_deliveries()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+BEGIN
+  INSERT INTO public.notification_push_deliveries (
+    notification_id,
+    push_subscription_id,
+    idempotency_key
+  )
+  SELECT
+    NEW.id,
+    ps.id,
+    md5(NEW.id::text || ':' || ps.id::text)
+  FROM public.push_subscriptions ps
+  WHERE ps.profile_id = NEW.recipient_profile_id
+  ORDER BY ps.id
+  FOR UPDATE
+  ON CONFLICT (notification_id, push_subscription_id) DO NOTHING;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.enqueue_notification_push_deliveries() FROM PUBLIC;
 
 -- 7) Claim-path guard (api/003): before any claim candidate is selected,
 -- terminalize work that must never be delivered — the target subscription

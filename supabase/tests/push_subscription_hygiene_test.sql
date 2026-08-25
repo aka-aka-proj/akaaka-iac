@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(49);
+SELECT plan(52);
 
 -- Structural contracts -------------------------------------------------------
 
@@ -382,6 +382,41 @@ SELECT is(
      AND profile_id = '00000000-0000-4000-8000-000000000302'),
   1,
   'the surviving binding belongs to the possessing profile'
+);
+
+-- Hijack-with-self-row attack (codex round-3): an attacker planting their own
+-- freshest row must never purge a foreign binding whose keys they lack.
+
+RESET ROLE;
+INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth, updated_at)
+VALUES ('00000000-0000-4000-8000-000000000301', 'https://push.local/e-hijack', 'p256dh-victim', 'auth-victim', now() - interval '1 hour');
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000303', true);
+SELECT throws_ok(
+  $$SELECT public.subscribe_push_subscription(
+    'https://push.local/e-hijack', 'p256dh-c', 'auth-c', 'UA-C'
+  )$$,
+  'P0001',
+  'endpoint_conflict',
+  'planted self-row cannot bind while foreign keys hold the endpoint'
+);
+
+RESET ROLE;
+SELECT is(
+  (SELECT count(*)::integer FROM public.push_subscriptions
+   WHERE endpoint = 'https://push.local/e-hijack'
+     AND profile_id = '00000000-0000-4000-8000-000000000303'),
+  0,
+  'rejected hijack plants no binding of its own'
+);
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.push_subscriptions
+   WHERE endpoint = 'https://push.local/e-hijack'
+     AND profile_id = '00000000-0000-4000-8000-000000000301'),
+  1,
+  'victim binding survives an attacker refresh that lacks victim key material'
 );
 
 -- Claim path contracts --------------------------------------------------------
