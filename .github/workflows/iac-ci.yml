@@ -240,8 +240,14 @@ jobs:
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
 
-          body="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""')"
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate > /tmp/pr_files.json 2>/dev/null || echo "[]" > /tmp/pr_files.json
+          # 安全 gate 必須 fail-closed：無法取得 diff（權限／rate limit／暫時性錯誤）
+          # 時不得視為「沒有契約變更」而放行
+          body="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""')" \
+            || { echo "::error::cannot read PR body; refusing to evaluate contract gate on unknown input"; exit 1; }
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate > /tmp/pr_files.json 2>/dev/null; then
+            echo "::error::cannot fetch PR files; refusing to evaluate contract gate on unknown diff"
+            exit 1
+          fi
           jq -s 'flatten' /tmp/pr_files.json > /tmp/pr_files_flat.json
 
           touches=0

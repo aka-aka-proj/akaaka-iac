@@ -278,6 +278,7 @@ jobs:
       class: ${{ steps.release.outputs.class }}
       run_id: ${{ steps.release.outputs.run_id }}
       expands: ${{ steps.release.outputs.expands }}
+      pending_expands: ${{ steps.release.outputs.pending_expands }}
       detail: ${{ steps.release.outputs.detail }}
     steps:
       - name: Ensure preview -> main PR, gates, merge, watch iac-cd
@@ -291,7 +292,7 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.release-docs.outputs.result }}
         run: |
           set -uo pipefail
-          result="failed"; pr=""; sha=""; deploy="unknown"; class="pre-merge-skipped"; run_id_out=""; expands_out="[]"; detail=""
+          result="failed"; pr=""; sha=""; deploy="unknown"; class="pre-merge-skipped"; run_id_out=""; expands_out="[]"; pending_out="[]"; resume_expands=""; detail=""
           declare -a expand_nums=()
           cleanup() {
             # 唯有部署結論為 success / no-deploy 時，expand 才算真正出貨
@@ -302,9 +303,21 @@ jobs:
                 entries+=("$(jq -cn --argjson pr "$en" --arg sha "$sha" --arg t "$now" '{pr:$pr,sha:$sha,shipped_at:$t}')")
               done
               expands_out="$(printf '%s\n' "${entries[@]}" | jq -s -c '.')"
+              pending_out="[]"
+            elif [ "${#expand_nums[@]}" -gt 0 ]; then
+              # 已合併但部署未收斂：記為 pending，resume 成功時入帳——否則 evidence gate 永遠看不到此 expand
+              local entries2=() en2
+              for en2 in "${expand_nums[@]}"; do
+                entries2+=("$(jq -cn --argjson pr "$en2" '{pr:$pr}')")
+              done
+              pending_out="$(printf '%s\n' "${entries2[@]}" | jq -s -c '.')"
             fi
-            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nclass=%s\nrun_id=%s\nexpands=%s\n' \
-              "$result" "$pr" "$sha" "$deploy" "$class" "$run_id_out" "$expands_out" >> "$GITHUB_OUTPUT"
+            if [ -n "$resume_expands" ] && { [ "$deploy" = "success" ] || [ "$deploy" = "no-deploy" ]; } && [ "$expands_out" = "[]" ]; then
+              expands_out="$resume_expands"
+              pending_out="[]"
+            fi
+            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nclass=%s\nrun_id=%s\nexpands=%s\npending_expands=%s\n' \
+              "$result" "$pr" "$sha" "$deploy" "$class" "$run_id_out" "$expands_out" "$pending_out" >> "$GITHUB_OUTPUT"
             detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-700)"
             printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
           }
@@ -344,8 +357,9 @@ jobs:
             done
             return 1
           }
+          # checkpoint schema v2 將各 repo 收進 .repos；相容讀取舊版頂層鍵
           state_get() {
-            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.repos[$k] // .[$k] // empty' || true
           }
           state_get_raw() {
             gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true
@@ -392,9 +406,12 @@ jobs:
             prevsha="$(printf '%s' "$prev" | jq -r '.sha // ""')"
             prevdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
             prev_run_id="$(printf '%s' "$prev" | jq -r '.run_id // ""')"
+            resume_expands="$(printf '%s' "$prev" | jq -r 'if ((.pending_expands // []) == []) then "" else (.pending_expands | tostring) end // ""' 2>/dev/null || echo "")"
+            [ "$resume_expands" = "null" ] && resume_expands=""
             case "$prevdep" in
               success|no-deploy|"")
-                result="no-changes"; class=""
+                # 收斂即視為無部署事實；下游 gate 接受 success|no-deploy|""
+                result="no-changes"; class=""; deploy="no-deploy"
                 detail="preview even with main; previous iac release fully verified"; exit 0 ;;
               timeout-discovery|timeout-poll)
                 # timeout 結論：以 rerun 起點重建有界窗口恢復監看（resumed attempt）
@@ -412,8 +429,28 @@ jobs:
           else
             if [ -z "$existing" ]; then
               title="chore(release): weekly production release $(date -u +%F)"
+              # 聚合 range task PR 的宣告到自動建立之 release PR body——contract-gate 對觸及 supabase 路徑的 PR（含本 PR）強制要求這些欄位
+              agg_compat="backward-compatible"; agg_docs_tokens=""
+              for tn in $(resolve_range_prs); do
+                tfiles="$(gh api "repos/$REPO/pulls/$tn/files" --paginate --jq '.[].filename' 2>/dev/null || true)"
+                printf '%s' "$tfiles" | touches_supabase_paths || continue
+                tb="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null || true)"
+                c="$(printf '%s' "$tb" | awk 'tolower($0) ~ /^compatibility:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')"
+                case "$c" in
+                  contract-step) agg_compat="contract-step" ;;
+                  expand-only) [ "$agg_compat" = "backward-compatible" ] && agg_compat="expand-only" ;;
+                esac
+                d="$(printf '%s' "$tb" | awk 'tolower($0) ~ /^docs:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
+                case "$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')" in
+                  none|"") : ;;
+                  *) agg_docs_tokens+="${agg_docs_tokens:+ }$d" ;;
+                esac
+              done
+              agg_docs="$(printf '%s' "$agg_docs_tokens" | tr ',' '\n' | tr -s ' \t' '\n' | sort -u | grep -E '^[0-9]+$' | paste -sd, -)"
+              [ -n "$agg_docs" ] || agg_docs="none"
+              prbody="$(printf 'Automated weekly production release. Merges validated \`preview\` into \`main\`.\nCompatibility: %s\nDocs: %s\n\nContract: docs/spec/platform/001-vercel-deployment-spec.md' "$agg_compat" "$agg_docs")"
               pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
-                --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
+                --body "$prbody")" || { detail="PR creation failed for $REPO"; exit 0; }
               sleep 20  # 讓 checks 完成註冊
             else
               pr="$existing"
@@ -491,6 +528,16 @@ jobs:
             # expand 都存在「Consumes-Expand 指向它且部署 READY＋smoke 通過」的 frontend entry
             if [ "${contract_flag:-0}" -eq 1 ]; then
               state_raw="$(state_get_raw)"
+              # 同一 release 不得同時出貨新 expand 與 contract-step：
+              # 新 expand 本週才要部署，frontend consumer 不可能在更早取得成功證據；
+              # 唯有已存在於 state.expands 的舊 expand 才由下方 evidence 規則把關
+              for en in "${expand_nums[@]}"; do
+                if ! printf '%s' "$state_raw" | jq -e --argjson p "$en" 'any((.expands // [])[]; .pr == $p)' >/dev/null 2>&1; then
+                  result="aborted"
+                  detail="contract-step blocked: expand-only task PR #$en is new in this same release; ship the expand first, land a consuming frontend release (READY+smoke), then contract in a later weekly release"
+                  exit 1
+                fi
+              done
               unconsumed="$(printf '%s' "$state_raw" | jq -r '
                 . as $root
                 | [ (($root.expands // [])[].pr) as $ep
@@ -647,6 +694,7 @@ jobs:
       class: ${{ steps.release.outputs.class }}
       vercel_uid: ${{ steps.release.outputs.vercel_uid }}
       consumptions: ${{ steps.release.outputs.consumptions }}
+      pending_consumptions: ${{ steps.release.outputs.pending_consumptions }}
       detail: ${{ steps.release.outputs.detail }}
     steps:
       - name: Ensure preview -> main PR, merge, watch Vercel, smoke check
@@ -663,7 +711,7 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
           set -uo pipefail
-          result="failed"; pr=""; sha=""; deploy="unknown"; smoke_out=""; class="pre-merge-skipped"; uid_out=""; cons_out="[]"; detail=""
+          result="failed"; pr=""; sha=""; deploy="unknown"; smoke_out=""; class="pre-merge-skipped"; uid_out=""; cons_out="[]"; pend_cons_out="[]"; resume_cons=""; detail=""
           declare -a cons_pending=()
           cleanup() {
             # 完整成功結論（READY＋smoke 通過）才登記 Consumes-Expand 配對
@@ -675,9 +723,23 @@ jobs:
                   '{expand_pr:$e,task_pr:$t,frontend_sha:$s,conclusion:"success"}')")
               done
               cons_out="$(printf '%s\n' "${entries[@]}" | jq -s -c '.')"
+              pend_cons_out="[]"
+            elif [ "${#cons_pending[@]}" -gt 0 ] && [ -n "$sha" ]; then
+              # 部署未收斂：配對記為 pending，resume 成功時轉正為 success
+              local pentries=() ppair ptn pce
+              for ppair in "${cons_pending[@]}"; do
+                pce="${ppair%%:*}"; ptn="${ppair##*:}"
+                pentries+=("$(jq -cn --argjson e "$pce" --argjson t "$ptn" --arg s "$sha" \
+                  '{expand_pr:$e,task_pr:$t,frontend_sha:$s,conclusion:"pending"}')")
+              done
+              pend_cons_out="$(printf '%s\n' "${pentries[@]}" | jq -s -c '.')"
             fi
-            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nsmoke=%s\nclass=%s\nvercel_uid=%s\nconsumptions=%s\n' \
-              "$result" "$pr" "$sha" "$deploy" "$smoke_out" "$class" "$uid_out" "$cons_out" >> "$GITHUB_OUTPUT"
+            if [ -n "$resume_cons" ] && [ "$deploy" = "success" ] && [ "$smoke_out" = "passed" ] && [ "$cons_out" = "[]" ]; then
+              cons_out="$(printf '%s' "$resume_cons" | jq -c '[.[] | .conclusion = "success"]')"
+              pend_cons_out="[]"
+            fi
+            printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nsmoke=%s\nclass=%s\nvercel_uid=%s\nconsumptions=%s\npending_consumptions=%s\n' \
+              "$result" "$pr" "$sha" "$deploy" "$smoke_out" "$class" "$uid_out" "$cons_out" "$pend_cons_out" >> "$GITHUB_OUTPUT"
             detail="$(printf '%s' "$detail" | tr '\n' ' ' | cut -c1-700)"
             printf 'detail=%s\n' "$detail" >> "$GITHUB_OUTPUT"
           }
@@ -697,8 +759,9 @@ jobs:
           }
 
 
+          # checkpoint schema v2 將各 repo 收進 .repos；相容讀取舊版頂層鍵
           state_get() {
-            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.[$k] // empty' || true
+            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.repos[$k] // .[$k] // empty' || true
           }
           resolve_range_prs() {
             local s nums="" associated msg refs shas
@@ -759,6 +822,8 @@ jobs:
             prevdep="$(printf '%s' "$prev" | jq -r '.deploy // ""')"
             prevsmoke="$(printf '%s' "$prev" | jq -r '.smoke // ""')"
             prev_uid="$(printf '%s' "$prev" | jq -r '.vercel_uid // ""')"
+            resume_cons="$(printf '%s' "$prev" | jq -r 'if ((.pending_consumptions // []) == []) then "" else (.pending_consumptions | tostring) end // ""' 2>/dev/null || echo "")"
+            [ "$resume_cons" = "null" ] && resume_cons=""
             if [ -z "$prevsha" ]; then
               result="no-changes"; class=""
               detail="preview even with main; no pending frontend state"; exit 0
@@ -787,8 +852,20 @@ jobs:
           else
             if [ -z "$existing" ]; then
               title="chore(release): weekly production release $(date -u +%F)"
+              # 聚合 range task PR 的 Consumes-Expand 宣告——consumes-expand-gate 對所有 PR（含本 release PR）強制要求此欄位
+              agg_cons_tokens=""
+              for tn in $(resolve_range_prs); do
+                tb="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null || true)"
+                ce="$(printf '%s' "$tb" | awk 'tolower($0) ~ /^consumes-expand:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
+                [ -n "$ce" ] || continue
+                [ "$(printf '%s' "$ce" | tr '[:upper:]' '[:lower:]')" = "none" ] && continue
+                agg_cons_tokens+="${agg_cons_tokens:+ }$ce"
+              done
+              agg_cons="$(printf '%s' "$agg_cons_tokens" | tr ',' '\n' | tr -s ' \t' '\n' | sort -un | grep -E '^[0-9]+$' | paste -sd, -)"
+              [ -n "$agg_cons" ] || agg_cons="none"
+              prbody="$(printf 'Automated weekly production release. Merges validated \`preview\` into \`main\`.\nConsumes-Expand: %s\n\nContract: docs/spec/platform/001-vercel-deployment-spec.md' "$agg_cons")"
               pr="$(gh pr create -R "$REPO" --base main --head preview --title "$title" \
-                --body "Automated weekly production release. Merges validated \`preview\` into \`main\`. Contract: docs/spec/platform/001-vercel-deployment-spec.md")" || { detail="PR creation failed for $REPO"; exit 0; }
+                --body "$prbody")" || { detail="PR creation failed for $REPO"; exit 0; }
               sleep 20
             else
               pr="$existing"
@@ -950,10 +1027,34 @@ jobs:
       GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
     steps:
       - name: Send consolidated status report
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+          # needs outputs 一律經 env 傳遞——inline interpolation 會被 shell 展開，
+          # detail 含引號時造成注入或語法錯誤（Codex P1）
+          D_RESULT: ${{ needs.release-docs.outputs.result }}
+          D_DEPLOY: ${{ needs.release-docs.outputs.deploy }}
+          D_PR: ${{ needs.release-docs.outputs.pr }}
+          D_SHA: ${{ needs.release-docs.outputs.sha }}
+          D_DETAIL: ${{ needs.release-docs.outputs.detail }}
+          D_JOB: ${{ needs.release-docs.result }}
+          I_RESULT: ${{ needs.release-iac.outputs.result }}
+          I_DEPLOY: ${{ needs.release-iac.outputs.deploy }}
+          I_PR: ${{ needs.release-iac.outputs.pr }}
+          I_SHA: ${{ needs.release-iac.outputs.sha }}
+          I_DETAIL: ${{ needs.release-iac.outputs.detail }}
+          I_JOB: ${{ needs.release-iac.result }}
+          F_RESULT: ${{ needs.release-frontend.outputs.result }}
+          F_DEPLOY: ${{ needs.release-frontend.outputs.deploy }}
+          F_SMOKE: ${{ needs.release-frontend.outputs.smoke }}
+          F_PR: ${{ needs.release-frontend.outputs.pr }}
+          F_SHA: ${{ needs.release-frontend.outputs.sha }}
+          F_DETAIL: ${{ needs.release-frontend.outputs.detail }}
+          F_JOB: ${{ needs.release-frontend.result }}
         run: |
           set -euo pipefail
 
-          row() { # name result deploy smoke pr sha needs_result detail
+          row() { # name result deploy smoke pr sha job_result detail
             local name="$1" res="$2" dep="$3" smk="$4" p="$5" s="$6" nr="$7" det="$8"
             if [ "$nr" = "skipped" ]; then
               res="skipped"
@@ -964,25 +1065,29 @@ jobs:
           }
 
           rows=""
-          rows+="$(row "akaaka-docs"     "${{ needs.release-docs.outputs.result }}"     "${{ needs.release-docs.outputs.deploy }}"     ""                                            "${{ needs.release-docs.outputs.pr }}"     "${{ needs.release-docs.outputs.sha }}"     "${{ needs.release-docs.result }}"     "${{ needs.release-docs.outputs.detail }}")"
-          rows+="$(row "akaaka-iac"      "${{ needs.release-iac.outputs.result }}"      "${{ needs.release-iac.outputs.deploy }}"      ""                                            "${{ needs.release-iac.outputs.pr }}"      "${{ needs.release-iac.outputs.sha }}"      "${{ needs.release-iac.result }}"      "${{ needs.release-iac.outputs.detail }}")"
-          rows+="$(row "akaaka-frontend" "${{ needs.release-frontend.outputs.result }}" "${{ needs.release-frontend.outputs.deploy }}" "${{ needs.release-frontend.outputs.smoke }}" "${{ needs.release-frontend.outputs.pr }}" "${{ needs.release-frontend.outputs.sha }}" "${{ needs.release-frontend.result }}" "${{ needs.release-frontend.outputs.detail }}")"
+          rows+="$(row "akaaka-docs"     "$D_RESULT" "$D_DEPLOY" ""        "$D_PR" "$D_SHA" "$D_JOB" "$D_DETAIL")"
+          rows+="$(row "akaaka-iac"      "$I_RESULT" "$I_DEPLOY" ""        "$I_PR" "$I_SHA" "$I_JOB" "$I_DETAIL")"
+          rows+="$(row "akaaka-frontend" "$F_RESULT" "$F_DEPLOY" "$F_SMOKE" "$F_PR" "$F_SHA" "$F_JOB" "$F_DETAIL")"
 
           overall="success"
           # 嚴格順序：任一 job 失敗或下游被 GitHub skip 即整體失敗
-          for r in "${{ needs.release-docs.result }}" "${{ needs.release-iac.result }}" "${{ needs.release-frontend.result }}"; do
+          for r in "$D_JOB" "$I_JOB" "$F_JOB"; do
             if [ "$r" = "failure" ] || [ "$r" = "skipped" ]; then overall="failure"; fi
           done
-          for res in "${{ needs.release-docs.outputs.result }}" "${{ needs.release-iac.outputs.result }}" "${{ needs.release-frontend.outputs.result }}"; do
+          for res in "$D_RESULT" "$I_RESULT" "$F_RESULT"; do
             case "$res" in failed|aborted|blocked|skipped-upstream) overall="failure" ;; esac
           done
-          for dep in "${{ needs.release-iac.outputs.deploy }}" "${{ needs.release-frontend.outputs.deploy }}"; do
+          for dep in "$I_DEPLOY" "$F_DEPLOY"; do
             case "$dep" in failed|timeout-discovery|timeout-poll) overall="failure" ;; esac
           done
+          # READY 但 smoke 失敗屬上線異常：整體判定必須反映，不得只出現在補償建議裡
+          if [ "$F_SMOKE" = "failed" ] && [ -n "$F_RESULT" ] && [ "$F_RESULT" != "dry-run" ]; then
+            overall="failure"
+          fi
           if [ "$overall" = "success" ] && \
-             [ "${{ needs.release-docs.outputs.result }}" != "released" ] && \
-             [ "${{ needs.release-iac.outputs.result }}" != "released" ] && \
-             [ "${{ needs.release-frontend.outputs.result }}" != "released" ]; then
+             [ "$D_RESULT" != "released" ] && \
+             [ "$I_RESULT" != "released" ] && \
+             [ "$F_RESULT" != "released" ]; then
             overall="nothing-to-ship"
           fi
 
@@ -991,22 +1096,19 @@ jobs:
           comp_added=0
           comp="<p style='color:#8a6d3b;font-size:13px'><b>Recommended actions</b><br/>"
           add_comp() { comp+="$1<br/>"; comp_added=1; }
-          idep="${{ needs.release-iac.outputs.deploy }}"; fdep="${{ needs.release-frontend.outputs.deploy }}"
-          ires="${{ needs.release-iac.outputs.result }}"; fres="${{ needs.release-frontend.outputs.result }}"
-          isha="${{ needs.release-iac.outputs.sha }}";    fsha="${{ needs.release-frontend.outputs.sha }}"
-          if [ "$ires" = "failed" ] || [ "$fres" = "failed" ]; then
+          if [ "$I_RESULT" = "failed" ] || [ "$F_RESULT" = "failed" ]; then
             add_comp "- Stage failed after merge(s): revert this run's merge commit or expedite a hotfix PR."
           fi
-          case "$idep" in
-            failed) add_comp "- akaaka-iac deployment terminal failure (SHA <code>$isha</code>): awaiting manual remediation — rerun the failed iac-cd run or redeploy exactly this SHA; alternatively revert/hotfix." ;;
-            timeout-discovery|timeout-poll) add_comp "- akaaka-iac deployment timed out (SHA <code>$isha</code>): rerun the orchestrator to resume watching with fresh bounded windows." ;;
+          case "$I_DEPLOY" in
+            failed) add_comp "- akaaka-iac deployment terminal failure (SHA <code>$I_SHA</code>): awaiting manual remediation — rerun the failed iac-cd run or redeploy exactly this SHA; alternatively revert/hotfix." ;;
+            timeout-discovery|timeout-poll) add_comp "- akaaka-iac deployment timed out (SHA <code>$I_SHA</code>): rerun the orchestrator to resume watching with fresh bounded windows." ;;
           esac
-          case "$fdep" in
-            failed) add_comp "- akaaka-frontend Vercel deployment terminal failure (SHA <code>$fsha</code>): awaiting manual remediation — trigger a Vercel redeploy of exactly this SHA; alternatively revert/hotfix." ;;
-            timeout-discovery|timeout-poll) add_comp "- akaaka-frontend deployment timed out (SHA <code>$fsha</code>): rerun the orchestrator to resume watching with fresh bounded windows." ;;
+          case "$F_DEPLOY" in
+            failed) add_comp "- akaaka-frontend Vercel deployment terminal failure (SHA <code>$F_SHA</code>): awaiting manual remediation — trigger a Vercel redeploy of exactly this SHA; alternatively revert/hotfix." ;;
+            timeout-discovery|timeout-poll) add_comp "- akaaka-frontend deployment timed out (SHA <code>$F_SHA</code>): rerun the orchestrator to resume watching with fresh bounded windows." ;;
           esac
-          if [ "${{ needs.release-frontend.outputs.smoke }}" = "failed" ]; then
-            add_comp "- akaaka-frontend smoke check failed on a READY deployment (SHA <code>$fsha</code>): rerunning the orchestrator re-runs only the smoke check; fix forward via hotfix if it persists."
+          if [ "$F_SMOKE" = "failed" ]; then
+            add_comp "- akaaka-frontend smoke check failed on a READY deployment (SHA <code>$F_SHA</code>): rerunning the orchestrator re-runs only the smoke check; fix forward via hotfix if it persists."
           fi
           comp+="</p>"
           if [ "$comp_added" -eq 0 ]; then comp=""; fi
@@ -1052,6 +1154,30 @@ jobs:
       - name: Persist release state checkpoint (schema v2)
         # dry-run 為唯讀規劃，不得建立或覆寫 checkpoint（否則會清掉待 resume 的失敗部署紀錄）
         if: ${{ always() && env.RELEASE_MODE != 'dry-run' }}
+        env:
+          GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+          # needs outputs 一律經 env 傳遞，杜絕 shell 注入（expands/consumptions 為含引號 JSON）
+          I_RESULT: ${{ needs.release-iac.outputs.result }}
+          I_PR: ${{ needs.release-iac.outputs.pr }}
+          I_SHA: ${{ needs.release-iac.outputs.sha }}
+          I_DEPLOY: ${{ needs.release-iac.outputs.deploy }}
+          I_RUN_ID: ${{ needs.release-iac.outputs.run_id }}
+          I_EXP: ${{ needs.release-iac.outputs.expands }}
+          I_PEND: ${{ needs.release-iac.outputs.pending_expands }}
+          F_RESULT: ${{ needs.release-frontend.outputs.result }}
+          F_PR: ${{ needs.release-frontend.outputs.pr }}
+          F_SHA: ${{ needs.release-frontend.outputs.sha }}
+          F_DEPLOY: ${{ needs.release-frontend.outputs.deploy }}
+          F_SMOKE: ${{ needs.release-frontend.outputs.smoke }}
+          F_UID: ${{ needs.release-frontend.outputs.vercel_uid }}
+          F_CONS: ${{ needs.release-frontend.outputs.consumptions }}
+          F_PEND: ${{ needs.release-frontend.outputs.pending_consumptions }}
+          D_RESULT: ${{ needs.release-docs.outputs.result }}
+          D_PR: ${{ needs.release-docs.outputs.pr }}
+          D_SHA: ${{ needs.release-docs.outputs.sha }}
+          D_JOB: ${{ needs.release-docs.result }}
+          I_JOB: ${{ needs.release-iac.result }}
+          F_JOB: ${{ needs.release-frontend.result }}
         run: |
           set -uo pipefail
           REPO="${GITHUB_REPOSITORY}"
@@ -1077,8 +1203,8 @@ jobs:
               version: 2,
               generated_at: "",
               repos: {
-                iac: ((.iac // {}) + {smoke:"",class:"",run_id:""}),
-                frontend: ((.frontend // {}) + {smoke:"",class:"",vercel_uid:""}),
+                iac: ((.iac // {}) + {smoke:"",class:"",run_id:"",pending_expands:[]}),
+                frontend: ((.frontend // {}) + {smoke:"",class:"",vercel_uid:"",pending_consumptions:[]}),
                 docs: ((.docs // {}) + {smoke:"",class:""})
               },
               expands: [],
@@ -1089,36 +1215,36 @@ jobs:
           # class 判定：本 run 有 merge 且結論未完全驗證 → post-merge-failed；
           # 未達 merge 即停止 → pre-merge-skipped（stage 腳本內已標記）
           iac_class=""
-          if [ "${{ needs.release-iac.outputs.result }}" = "released" ]; then
-            case "${{ needs.release-iac.outputs.deploy }}" in
+          if [ "$I_RESULT" = "released" ]; then
+            case "$I_DEPLOY" in
               success|no-deploy) iac_class="" ;;
               *) iac_class="post-merge-failed" ;;
             esac
           fi
           fe_class=""
-          if [ "${{ needs.release-frontend.outputs.result }}" = "released" ]; then
-            if [ "${{ needs.release-frontend.outputs.deploy }}" = "success" ] && [ "${{ needs.release-frontend.outputs.smoke }}" = "passed" ]; then
+          if [ "$F_RESULT" = "released" ]; then
+            if [ "$F_DEPLOY" = "success" ] && [ "$F_SMOKE" = "passed" ]; then
               fe_class=""
             else
               fe_class="post-merge-failed"
             fi
           fi
           docs_class=""
-          if [ "${{ needs.release-docs.outputs.result }}" = "released" ]; then docs_class=""; fi
+          if [ "$D_RESULT" = "released" ]; then docs_class=""; fi
 
           state="$(jq -n \
             --argjson prev "${prev_norm:-null}" \
-            --arg ir "${{ needs.release-iac.outputs.result }}" --arg ipr "${{ needs.release-iac.outputs.pr }}" \
-            --arg isha "${{ needs.release-iac.outputs.sha }}" --arg idep "${{ needs.release-iac.outputs.deploy }}" \
-            --arg icls "$iac_class" --arg irun "${{ needs.release-iac.outputs.run_id }}" \
-            --arg iexp "${{ needs.release-iac.outputs.expands }}" \
-            --arg fr "${{ needs.release-frontend.outputs.result }}" --arg fpr "${{ needs.release-frontend.outputs.pr }}" \
-            --arg fsha "${{ needs.release-frontend.outputs.sha }}" --arg fdep "${{ needs.release-frontend.outputs.deploy }}" \
-            --arg fsmoke "${{ needs.release-frontend.outputs.smoke }}" --arg fcls "$fe_class" \
-            --arg fuuid "${{ needs.release-frontend.outputs.vercel_uid }}" \
-            --arg fcons "${{ needs.release-frontend.outputs.consumptions }}" \
-            --arg dr "${{ needs.release-docs.outputs.result }}" --arg dpr "${{ needs.release-docs.outputs.pr }}" \
-            --arg dsha "${{ needs.release-docs.outputs.sha }}" --arg dcls "$docs_class" \
+            --arg ir "$I_RESULT" --arg ipr "$I_PR" \
+            --arg isha "$I_SHA" --arg idep "$I_DEPLOY" \
+            --arg icls "$iac_class" --arg irun "$I_RUN_ID" \
+            --arg iexp "$I_EXP" --arg ipend "$I_PEND" \
+            --arg fr "$F_RESULT" --arg fpr "$F_PR" \
+            --arg fsha "$F_SHA" --arg fdep "$F_DEPLOY" \
+            --arg fsmoke "$F_SMOKE" --arg fcls "$fe_class" \
+            --arg fuuid "$F_UID" \
+            --arg fcons "$F_CONS" --arg fpend "$F_PEND" \
+            --arg dr "$D_RESULT" --arg dpr "$D_PR" \
+            --arg dsha "$D_SHA" --arg dcls "$docs_class" \
             --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '
             def blank_iac: {result:"",pr:null,sha:"",deploy:"",smoke:"",class:"",run_id:"",detail:""};
@@ -1161,7 +1287,20 @@ jobs:
                    and ($dr == "released" or $dr == "no-changes")
                 then $now else (($prev.last_full_release_at // "")) end
               )
-            }')"
+            }
+            # pending evidence：合併後部署未收斂時暫存；resume 成功的 run 由 stage 直接
+            # 輸出為正式 ledger entry，此處同步清空；未收斂則以本 run 最新狀態覆寫
+            | .repos.iac.pending_expands = (
+                if ($ir == "released" and ($idep == "success" or $idep == "no-deploy")) then []
+                elif ($ir == "released" and $ipend != "" and $ipend != "[]") then ($ipend | fromjson)
+                elif (($prev.repos.iac.pending_expands // []) != []) then ($prev.repos.iac.pending_expands)
+                else ($ipend | if . == "" or . == "[]" then [] else fromjson end) end)
+              | .repos.frontend.pending_consumptions = (
+                if ($fr == "released" and $fdep == "success" and $fsmoke == "passed") then []
+                elif ($fr == "released" and $fpend != "" and $fpend != "[]") then ($fpend | fromjson)
+                elif (($prev.repos.frontend.pending_consumptions // []) != []) then ($prev.repos.frontend.pending_consumptions)
+                else ($fpend | if . == "" or . == "[]" then [] else fromjson end) end)
+          ')"
 
           if ! printf '%s' "$state" | jq -e 'type == "object"' >/dev/null 2>&1; then
             echo "::warning::computed state invalid; skipping persist"
