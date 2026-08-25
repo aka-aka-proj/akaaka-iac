@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { generateRecurringDates, validateRecurrenceRule, RecurrenceSeriesTooLongError } from '../_shared/recurrence.ts'
+import { generateRecurringDates, validateRecurrenceRule, RecurrenceSeriesTooLongError, computeInstanceRegistrationDeadline } from '../_shared/recurrence.ts'
 import type { RecurrenceRule } from '../_shared/recurrence.ts'
 
 const corsHeaders = {
@@ -91,7 +91,7 @@ Deno.serve(async (req: Request) => {
         location_region: parentEvent.location_region,
         location_detail: parentEvent.location_detail,
         max_capacity: parentEvent.max_capacity,
-        registration_deadline: parentEvent.registration_deadline,
+        registration_deadline: computeInstanceRegistrationDeadline(nextDate.getTime(), rule) ?? parentEvent.registration_deadline,
         external_registration_url: parentEvent.external_registration_url,
         source_url: parentEvent.source_url,
       }]).select('id').single()
