@@ -48,22 +48,22 @@ INSERT INTO public.profiles (id) VALUES ('00000000-0000-0000-0000-000000000001':
 
 INSERT INTO public.events (
   id, creator_id, title, start_time, location_region,
-  lifecycle_status, attendance_fee_type, series_id, recurrence_rule
+  lifecycle_status, event_type, attendance_fee_type, series_id, recurrence_rule
 ) VALUES (
   '00000000-0000-0000-0000-000000000010'::uuid,
   '00000000-0000-0000-0000-000000000001'::uuid,
   'Parent event', '2026-09-01T12:00:00Z', 'Online',
-  'draft', 'free', NULL, '{"frequency":"weekly","interval":1,"days":["Mon"],"count":4,"timezone":"Asia/Taipei"}'::jsonb
+  'draft', '{}'::text[], 'free', NULL, '{"frequency":"weekly","interval":1,"days":["Mon"],"count":4,"timezone":"Asia/Taipei"}'::jsonb
 );
 
 INSERT INTO public.events (
   id, creator_id, title, start_time, location_region,
-  lifecycle_status, attendance_fee_type, series_id
+  lifecycle_status, event_type, attendance_fee_type, series_id
 ) VALUES (
   '00000000-0000-0000-0000-000000000011'::uuid,
   '00000000-0000-0000-0000-000000000001'::uuid,
   'Child event', '2026-09-07T12:00:00Z', 'Online',
-  'draft', 'free', '00000000-0000-0000-0000-000000000010'::uuid
+  'draft', '{}'::text[], 'free', '00000000-0000-0000-0000-000000000010'::uuid
 );
 
 SELECT lives_ok(
