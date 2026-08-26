@@ -1,226 +1,97 @@
 #!/usr/bin/env -S deno run --allow-env --allow-net
 
-/**
- * Authenticated Test Agent — CLI tool for managing Supabase test user accounts.
- *
- * Uses service_role key to create confirmed test users and return JWTs for
- * authenticated API calls. Designed for CI/staging use only.
- *
- * Usage:
- *   deno run --allow-env --allow-net --config supabase/functions/deno.json \
- *     supabase/functions/testing/authenticated-test-agent.ts <command> [options]
- *
- * Commands:
- *   create [email]     Create a confirmed test user; auto-generates email if omitted
- *   cleanup            Delete all test accounts (email matching test prefix)
- *   list               List all test accounts (dry-run — no changes)
- */
-
 import { createClient } from "@supabase/supabase-js";
 
-// ── Constants ──────────────────────────────────────────────────────
 const TEST_EMAIL_PREFIX = "iac.patrol.test.";
 const DEFAULT_PASSWORD = "test-password-123!";
 
-// ── Types ──────────────────────────────────────────────────────────
-interface TestAccount {
-  id: string;
-  email: string;
-  created_at: string;
-}
+interface TestUserResult { email: string; access_token: string; expires_at: number; }
 
-interface TestUserResult {
-  email: string;
-  access_token: string;
-  expires_at: number;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────
 function getEnvOrThrow(name: string): string {
-  const value = Deno.env.get(name);
-  if (!value) {
-    throw new Error(
-      `Missing required env var: ${name}. ` +
-      `Set it to proceed.\n` +
-      `  export ${name}="your-value"`,
-    );
-  }
-  return value;
+  const v = Deno.env.get(name);
+  if (!v) throw new Error(`Missing: ${name}`);
+  return v;
 }
-
-function testEmail(email: string): boolean {
-  return email.startsWith(TEST_EMAIL_PREFIX);
+function testEmail(e: string): boolean { return e.startsWith(TEST_EMAIL_PREFIX); }
+function genEmail(): string {
+  return `${TEST_EMAIL_PREFIX}${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}@gmail.com`;
 }
-
-/** Generate a unique test email with timestamp + random suffix. */
-function generateTestEmail(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${TEST_EMAIL_PREFIX}${ts}.${rand}@gmail.com`;
-}
-
-function getAdminClient() {
-  const supabaseUrl = getEnvOrThrow("SUPABASE_URL");
-  const serviceRoleKey = getEnvOrThrow("SERVICE_ROLE_KEY");
-  return createClient(supabaseUrl, serviceRoleKey, {
+function adminClient() {
+  return createClient(getEnvOrThrow("SUPABASE_URL"), getEnvOrThrow("SERVICE_ROLE_KEY"), {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 }
 
-// ── Commands ────────────────────────────────────────────────────────
-
-/**
- * Create a confirmed test user and return a usable JWT.
- *
- * POST /auth/v1/admin/users  (requires service_role key)
- * The admin API creates the user and immediately confirms their email,
- * bypassing the email confirmation flow.
- *
- * After creation, we sign in with password to get a fresh JWT session.
- */
-async function cmdCreate(emailArg?: string): Promise<void> {
-  const email = emailArg ?? generateTestEmail();
-  const adminClient = getAdminClient();
-
-  // 1. Create confirmed user via admin API
-  const { data: user, error: createError } = await adminClient.auth.admin.createUser({
-    email,
-    password: DEFAULT_PASSWORD,
-    email_confirm: true,
-    user_metadata: { test_account: true, created_by: "authenticated-test-agent" },
-  });
-
-  if (createError) {
-    console.error(`Failed to create test user ${email}: ${createError.message}`);
-    Deno.exit(1);
+async function allUsers(c: ReturnType<typeof adminClient>) {
+  const r: Array<{ id: string; email: string | undefined; created_at: string }> = [];
+  let p = 1;
+  for (;;) {
+    const { data, error } = await c.auth.admin.listUsers({ page: p, perPage: 100 });
+    if (error) throw new Error(`listUsers p${p}: ${error.message}`);
+    if (!data?.users?.length) break;
+    for (const u of data.users) r.push({ id: u.id, email: u.email, created_at: u.created_at });
+    if (data.users.length < 100) break;
+    p++;
   }
-  if (!user?.user) {
-    console.error("User creation returned empty response");
-    Deno.exit(1);
-  }
-
-  // 2. Sign in to get session (confirms the user works end-to-end)
-  const userClient = createClient(getEnvOrThrow("SUPABASE_URL"), getEnvOrThrow("SUPABASE_ANON_KEY"));
-  const { data: session, error: signInError } = await userClient.auth.signInWithPassword({
-    email,
-    password: DEFAULT_PASSWORD,
-  });
-
-  if (signInError || !session?.session) {
-    // User was created but sign-in failed — something is wrong
-    console.error(`User created (${user.user.id}) but sign-in failed: ${signInError?.message ?? "no session"}`);
-    // Clean up the user we just created
-    await adminClient.auth.admin.deleteUser(user.user.id);
-    Deno.exit(1);
-  }
-
-  const result: TestUserResult = {
-    email,
-    access_token: session.session.access_token,
-    expires_at: Math.floor(Date.now() / 1000) + session.session.expires_in,
-  };
-
-  // Machine-readable JSON output for CI consumption
-  console.log(JSON.stringify(result));
+  return r;
 }
 
-/**
- * List all test accounts (matching test email prefix).
- * Dry-run — never deletes anything.
- */
-async function cmdList(): Promise<void> {
-  const adminClient = getAdminClient();
-  const { data: users, error } = await adminClient.auth.admin.listUsers();
-
-  if (error) {
-    console.error(`Failed to list users: ${error.message}`);
-    Deno.exit(1);
+async function delUser(c: ReturnType<typeof adminClient>, uid: string): Promise<string | null> {
+  for (const [tbl, col] of [
+    ["events", "creator_id"], ["event_threads", "profile_id"], ["event_registrations", "reviewed_by"],
+    ["recommendations", "from_profile_id"], ["recommendations", "to_profile_id"],
+    ["blocks", "blocker_id"], ["blocks", "blocked_id"],
+    ["reports", "reporter_id"], ["reports", "target_profile_id"],
+    ["moderation_actions", "admin_id"], ["moderation_actions", "target_profile_id"],
+    ["audit_logs", "actor_id"], ["audit_logs", "target_profile_id"],
+  ] as const) {
+    const { error } = await c.from(tbl).delete().eq(col, uid);
+    if (error) console.error(`clean ${tbl}.${col}: ${error.message}`);
   }
-
-  const testAccounts: TestAccount[] = (users?.users ?? [])
-    .filter((u) => u.email && testEmail(u.email))
-    .map((u) => ({
-      id: u.id,
-      email: u.email!,
-      created_at: u.created_at,
-    }));
-
-  console.log(JSON.stringify({ count: testAccounts.length, accounts: testAccounts }, null, 2));
+  const { error: pe } = await c.from("profiles").delete().eq("id", uid);
+  if (pe) return `profile delete: ${pe.message}`;
+  const { error: ae } = await c.auth.admin.deleteUser(uid);
+  if (ae) return `auth delete: ${ae.message}`;
+  return null;
 }
 
-/**
- * Delete all test accounts (matching test email prefix).
- * Reports count of deleted accounts.
- */
-async function cmdCleanup(): Promise<void> {
-  const adminClient = getAdminClient();
-  const { data: users, error } = await adminClient.auth.admin.listUsers();
-
-  if (error) {
-    console.error(`Failed to list users: ${error.message}`);
-    Deno.exit(1);
-  }
-
-  const testAccounts = (users?.users ?? [])
-    .filter((u) => u.email && testEmail(u.email));
-
-  let deleted = 0;
-  let failed = 0;
-
-  for (const user of testAccounts) {
-    const { error: deleteError } = await adminClient.auth.admin.deleteUser(user.id);
-    if (deleteError) {
-      console.error(`Failed to delete ${user.email} (${user.id}): ${deleteError.message}`);
-      failed += 1;
-    } else {
-      deleted += 1;
-    }
-  }
-
-  console.log(JSON.stringify({ deleted, failed, total_found: testAccounts.length }));
+async function cmdCreate(emailArg?: string) {
+  const email = emailArg ?? genEmail();
+  if (!testEmail(email)) { console.error("Email must match test prefix"); Deno.exit(1); }
+  const c = adminClient();
+  const { data: u, error: ce } = await c.auth.admin.createUser({ email, password: DEFAULT_PASSWORD, email_confirm: true });
+  if (ce || !u?.user) { console.error(`Create fail: ${ce?.message}`); Deno.exit(1); }
+  const { error: pe } = await c.from("profiles").upsert({
+    id: u.user.id, display_name: email.split("@")[0], role_status: "general", reputation_score: 0,
+  }, { onConflict: "id" });
+  if (pe) { console.error(`Profile fail: ${pe.message}`); await delUser(c, u.user.id); Deno.exit(1); }
+  const uc = createClient(getEnvOrThrow("SUPABASE_URL"), getEnvOrThrow("SUPABASE_ANON_KEY"));
+  const { data: s, error: se } = await uc.auth.signInWithPassword({ email, password: DEFAULT_PASSWORD });
+  if (se || !s?.session) { console.error(`Signin fail: ${se?.message}`); await delUser(c, u.user.id); Deno.exit(1); }
+  console.log(JSON.stringify({ email, access_token: s.session.access_token, expires_at: Math.floor(Date.now() / 1000) + s.session.expires_in }));
 }
 
-// ── Main ────────────────────────────────────────────────────────────
-async function main() {
-  const command = Deno.args[0];
-
-  if (!command || command === "--help" || command === "-h") {
-    console.log(`
-Authenticated Test Agent — create/list/cleanup Supabase test accounts
-
-Usage:
-  deno run --allow-env --allow-net --config supabase/functions/deno.json \\
-    supabase/functions/testing/authenticated-test-agent.ts <command> [options]
-
-Commands:
-  create [email]    Create a confirmed test user (auto-generates email if omitted)
-                    Output: JSON { email, access_token, expires_at }
-  list              List all test accounts matching prefix "${TEST_EMAIL_PREFIX}"
-  cleanup           Delete all test accounts matching prefix "${TEST_EMAIL_PREFIX}"
-  --help, -h        Show this help
-
-Required env vars:
-  SUPABASE_URL         Supabase project URL
-  SERVICE_ROLE_KEY     service_role key (admin privileges)
-  SUPABASE_ANON_KEY    anon key (for sign-in verification)
-`);
-    Deno.exit(0);
-  }
-
-  switch (command) {
-    case "create":
-      await cmdCreate(Deno.args[1]);
-      break;
-    case "list":
-      await cmdList();
-      break;
-    case "cleanup":
-      await cmdCleanup();
-      break;
-    default:
-      console.error(`Unknown command: ${command}. Use --help for usage.`);
-      Deno.exit(1);
-  }
+async function cmdList() {
+  const users = await allUsers(adminClient());
+  const accts = users.filter((u) => u.email && testEmail(u.email)).map((u) => ({ id: u.id, email: u.email, created_at: u.created_at }));
+  console.log(JSON.stringify({ count: accts.length, accounts: accts }, null, 2));
 }
 
-await main();
+async function cmdCleanup() {
+  const c = adminClient();
+  const users = await allUsers(c);
+  const todo = users.filter((u) => u.email && testEmail(u.email));
+  let deleted = 0, failed = 0;
+  for (const u of todo) {
+    const err = await delUser(c, u.id);
+    if (err) { console.error(`Fail ${u.email}: ${err}`); failed++; } else deleted++;
+  }
+  console.log(JSON.stringify({ deleted, failed, total: todo.length }));
+  if (failed > 0) Deno.exit(1);
+}
+
+const m = Deno.args[0];
+if (!m || m === "--help") { console.log("Commands: create [email], list, cleanup"); Deno.exit(0); }
+const cmds: Record<string, () => Promise<void>> = { create: () => cmdCreate(Deno.args[1]), list: cmdList, cleanup: cmdCleanup };
+if (!cmds[m]) { console.error(`Unknown: ${m}`); Deno.exit(1); }
+await cmds[m]();
