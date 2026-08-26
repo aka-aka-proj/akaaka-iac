@@ -104,14 +104,16 @@ async function deleteTestUser(
   const serviceClient = adminClient;
 
   // Delete related data that references profiles (no ON DELETE CASCADE)
-  const tablesToClean: [string, string][] = [
+const tablesToClean: [string, string][] = [
     ["events", "creator_id"],
     ["event_threads", "profile_id"],
+    ["event_registrations", "reviewed_by"],
     ["recommendations", "from_profile_id"],
     ["recommendations", "to_profile_id"],
     ["blocks", "blocker_id"],
     ["blocks", "blocked_id"],
     ["reports", "reporter_id"],
+    ["reports", "target_profile_id"],
     ["moderation_actions", "admin_id"],
     ["moderation_actions", "target_profile_id"],
     ["audit_logs", "actor_id"],
@@ -190,7 +192,7 @@ async function cmdCreate(emailArg?: string): Promise<void> {
     id: userId,
     display_name: email.split("@")[0],
     role_status: "general",
-    reputation_points: 0,
+    reputation_score: 0,
   };
 
   const { error: profileError } = await adminClient
