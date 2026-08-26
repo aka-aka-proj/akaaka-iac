@@ -103,8 +103,11 @@ async function deleteTestUser(
 ): Promise<string | null> {
   const serviceClient = adminClient;
 
-  // Delete related data that references profiles (no ON DELETE CASCADE)
-const tablesToClean: [string, string][] = [
+  // Delete related data that references profiles (no ON DELETE CASCADE).
+  // Reports targeting an event must be removed before the event itself because
+  // reports.target_event_id also has the default NO ACTION delete behavior.
+  const tablesToClean: [string, string][] = [
+    ["reports", "target_event_id"],
     ["events", "creator_id"],
     ["event_threads", "profile_id"],
     ["event_registrations", "reviewed_by"],
@@ -120,14 +123,19 @@ const tablesToClean: [string, string][] = [
     ["audit_logs", "target_profile_id"],
   ];
 
+  const cleanupErrors: string[] = [];
   for (const [table, column] of tablesToClean) {
     const { error: delErr } = await serviceClient
       .from(table)
       .delete()
       .eq(column, userId);
     if (delErr) {
-      console.error(`Failed to clean ${table}.${column}: ${delErr.message}`);
+      cleanupErrors.push(`${table}.${column}: ${delErr.message}`);
     }
+  }
+
+  if (cleanupErrors.length > 0) {
+    return `Failed to clean related data: ${cleanupErrors.join("; ")}`;
   }
 
   // Delete profile
