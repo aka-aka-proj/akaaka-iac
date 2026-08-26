@@ -26,12 +26,6 @@ interface SeriesEventRow {
   publication_status: string
 }
 
-interface SeriesMemberRow {
-  event_id: string
-  position: number
-  event: SeriesEventRow | null
-}
-
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (req.method !== 'POST') return errorResponse('validation_error', 'Only POST is supported', 400)
@@ -97,35 +91,44 @@ Deno.serve(async (req: Request) => {
     }
 
     // 3. Fetch all member events
-    const { data: members, error: membersError } = await serviceClient
+    const { data: rawMembers, error: membersError } = await serviceClient
       .from('event_series_membership')
       .select('event_id, position, event:events(id, creator_id, max_capacity, registration_deadline, external_registration_url, lifecycle_status, publication_status)')
       .eq('series_id', seriesId)
       .order('position', { ascending: true })
 
-    if (membersError || !members || members.length === 0) {
+    if (membersError || !rawMembers || rawMembers.length === 0) {
       return errorResponse('not_found', 'Series has no member events', 404)
     }
 
     // 4. Validate all events are accessible
-    const typedMembers = members as SeriesMemberRow[]
-    const events: SeriesEventRow[] = typedMembers
-      .map((m: SeriesMemberRow) => m.event)
-      .filter((e: SeriesEventRow | null): e is SeriesEventRow => e !== null)
+    const members = (rawMembers as unknown) as Array<{
+      event_id: string
+      position: number
+      event: unknown[]
+    }>
+    const events: SeriesEventRow[] = []
+    for (const member of members) {
+      const nested = Array.isArray(member.event) ? member.event[0] : member.event
+      if (nested && typeof nested === 'object') {
+        events.push(nested as SeriesEventRow)
+      }
+    }
+
+    if (events.length === 0) {
+      return errorResponse('not_found', 'Member events could not be loaded', 404)
+    }
 
     for (const event of events) {
       if (event.external_registration_url) {
         return errorResponse('external_registration', 'One or more events use external registration', 400)
       }
-
       if (event.lifecycle_status === 'cancelled' || event.publication_status === 'closed') {
         return errorResponse('event_closed', `Event ${event.id} is not open for registration`, 400)
       }
-
       if (event.registration_deadline && new Date(event.registration_deadline) < new Date()) {
         return errorResponse('registration_closed', `Registration deadline has passed for event ${event.id}`, 400)
       }
-
       if (event.creator_id === user.id) {
         return errorResponse('host_cannot_register', `You are the host of event ${event.id}`, 400)
       }
