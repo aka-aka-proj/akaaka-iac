@@ -20,6 +20,9 @@ concurrency:
 env:
   SUPABASE_URL: https://xdknuxdhyvjgwlcliyqx.supabase.co
 
+permissions:
+  contents: read
+
 jobs:
   auth-test:
     name: ${{ github.event.inputs.command == 'create' && 'Create test user' || github.event.inputs.command == 'cleanup' && 'Cleanup test users' || 'List test users' }}

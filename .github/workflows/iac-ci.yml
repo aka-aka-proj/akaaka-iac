@@ -197,7 +197,8 @@ jobs:
         run: |
           missing=0
           while IFS= read -r dir; do
-            if [ "$(basename "$dir")" = "_shared" ]; then
+            basename=$(basename "$dir")
+            if [ "$basename" = "_shared" ] || [ "$basename" = "testing" ]; then
               continue
             fi
             if [ -f "$dir/index.ts" ] || [ -f "$dir/index.js" ]; then
