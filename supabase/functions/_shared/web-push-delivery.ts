@@ -125,6 +125,16 @@ export function fenceSyntheticDeliveryCancelled(record: SyntheticDeliveryRecord)
   return { ...record, status: 'cancelled' }
 }
 
+export function deliverSyntheticOnce(
+  claimed: SyntheticDeliveryRecord,
+  sendProviderRequest: (record: SyntheticDeliveryRecord) => ProviderOutcome,
+): { record: SyntheticDeliveryRecord; providerCalls: number } {
+  if (!canSendToProvider(claimed)) {
+    return { record: fenceSyntheticDeliveryCancelled(claimed), providerCalls: 0 }
+  }
+  return { record: applySyntheticOutcome(claimed, sendProviderRequest(claimed)), providerCalls: 1 }
+}
+
 export function applySyntheticOutcome(
   record: SyntheticDeliveryRecord,
   outcome: ProviderOutcome,

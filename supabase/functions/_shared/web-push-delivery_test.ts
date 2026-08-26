@@ -1,17 +1,17 @@
 import {
   buildMinimalPushPayload,
-  canSendToProvider,
   classifyProviderResponse,
   createDeliveryIdempotencyKey,
   createSyntheticDeliveryRecord,
   applySyntheticOutcome,
   claimSyntheticDelivery,
+  deliverSyntheticOnce,
   deleteSyntheticSubscription,
-  fenceSyntheticDeliveryCancelled,
   moveSyntheticSubscriptionOwnership,
   replaySyntheticDelivery,
   retryDelayMs,
 } from './web-push-delivery.ts'
+import type { ProviderOutcome } from './web-push-delivery.ts'
 
 const notificationId = '00000000-0000-4000-8000-000000000001'
 const eventId = '00000000-0000-4000-8000-000000000002'
@@ -103,23 +103,26 @@ Deno.test('404/410 invalidates endpoint and deletion prevents replay', async () 
 })
 
 Deno.test('ownership handover after claim fences the provider call to zero side effects', async () => {
-  const record = await createSyntheticDeliveryRecord(notificationId, profileId)
-  const claimed = claimSyntheticDelivery(record)
-  if (!canSendToProvider(claimed)) throw new Error('expected sendable after a clean claim')
+  let providerCalls: number = 0
+  const send = (): ProviderOutcome => {
+    providerCalls += 1
+    return 'success'
+  }
 
-  const moved = moveSyntheticSubscriptionOwnership(claimed)
-  if (canSendToProvider(moved)) throw new Error('provider must not be called across an ownership handover')
-  const cancelled = fenceSyntheticDeliveryCancelled(moved)
-  if (cancelled.status !== 'cancelled') throw new Error('expected fenced terminal cancellation')
-  if (applySyntheticOutcome(cancelled, 'success').status !== 'cancelled') {
+  const claimed = claimSyntheticDelivery(await createSyntheticDeliveryRecord(notificationId, profileId))
+  const fenced = deliverSyntheticOnce(moveSyntheticSubscriptionOwnership(claimed), send)
+  if (providerCalls !== 0) throw new Error('fenced handover must not reach the provider')
+  if (fenced.record.status !== 'cancelled') throw new Error('expected fenced terminal cancellation')
+  if (applySyntheticOutcome(fenced.record, 'success').status !== 'cancelled') {
     throw new Error('cancelled must be terminal against provider outcomes')
   }
-  if (replaySyntheticDelivery(cancelled).status !== 'cancelled') throw new Error('cancelled must not replay')
-  if (claimSyntheticDelivery(cancelled).status !== 'cancelled') throw new Error('cancelled must not re-claim')
-  if (fenceSyntheticDeliveryCancelled(cancelled).status !== 'cancelled') {
-    throw new Error('cancellation must be idempotent')
-  }
+  if (replaySyntheticDelivery(fenced.record).status !== 'cancelled') throw new Error('cancelled must not replay')
+  if (claimSyntheticDelivery(fenced.record).status !== 'cancelled') throw new Error('cancelled must not re-claim')
 
-  const control = applySyntheticOutcome(claimSyntheticDelivery(await createSyntheticDeliveryRecord(eventId, profileId)), 'success')
-  if (control.status !== 'sent') throw new Error('control path without handover must deliver exactly once')
+  const control = deliverSyntheticOnce(
+    claimSyntheticDelivery(await createSyntheticDeliveryRecord(eventId, profileId)),
+    send,
+  )
+  if (providerCalls !== 1) throw new Error('clean path must call the provider exactly once')
+  if (control.record.status !== 'sent') throw new Error('control path must deliver')
 })
