@@ -17,6 +17,7 @@ export interface SeriesMemberRow {
   start_time: string
   lifecycle_status: string
   creator_id: string
+  registration_deadline?: string | null
   [key: string]: unknown
 }
 
