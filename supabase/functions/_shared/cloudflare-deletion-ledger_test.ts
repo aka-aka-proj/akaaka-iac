@@ -22,12 +22,12 @@ Deno.test('Cloudflare adapter uses server token and metadata-only routes', async
   let current: DeletionRecord = { ...event, status: 'recorded' }
   const ledger = createCloudflareDeletionLedger({
     workerUrl: 'https://ledger.example.com', applicationUrl: 'https://app.example.com', authToken: 'server-only-token',
-    fetchImpl: async (input, init) => {
+    fetchImpl: (input, init) => {
       const request = new Request(input, init)
       requests.push(request)
-      if (request.method === 'GET') return Response.json({ records: [current] })
-      if (request.method === 'PATCH') { current = { ...current, status: 'applied', appliedAt: '2026-08-16T00:01:00Z' }; return Response.json({ record: current }) }
-      return Response.json({ record: current })
+      if (request.method === 'GET') return Promise.resolve(Response.json({ records: [current] }))
+      if (request.method === 'PATCH') { current = { ...current, status: 'applied', appliedAt: '2026-08-16T00:01:00Z' }; return Promise.resolve(Response.json({ record: current })) }
+      return Promise.resolve(Response.json({ record: current }))
     },
   })
   await ledger.append(event)

@@ -13,10 +13,11 @@ function fakeClientFactory() {
   return () =>
     ({
       auth: {
-        getUser: async () => ({
-          data: { user: { id: "authenticated-user" } },
-          error: null,
-        }),
+        getUser: () =>
+          Promise.resolve({
+            data: { user: { id: "authenticated-user" } },
+            error: null,
+          }),
       },
     }) as never;
 }
@@ -68,10 +69,11 @@ Deno.test("analytics handler rejects an invalid authorization token", async () =
   const invalidClientFactory = () =>
     ({
       auth: {
-        getUser: async () => ({
-          data: { user: null },
-          error: new Error("invalid token"),
-        }),
+        getUser: () =>
+          Promise.resolve({
+            data: { user: null },
+            error: new Error("invalid token"),
+          }),
       },
     }) as never;
   const request = new Request("https://example.test", {

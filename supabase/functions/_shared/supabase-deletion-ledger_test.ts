@@ -58,11 +58,11 @@ Deno.test('Supabase adapter appends with fixed metadata allowlist and idempotent
     ledgerUrl: 'https://ledger.supabase.co',
     applicationUrl: 'https://app.supabase.co',
     serviceRoleKey: 'server-only-key',
-    fetchImpl: async (input, init) => {
+    fetchImpl: (input, init) => {
       const request = new Request(input, init)
       requests.push(request)
-      if (request.method === 'POST') return Response.json([])
-      return Response.json([row()])
+      if (request.method === 'POST') return Promise.resolve(Response.json([]))
+      return Promise.resolve(Response.json([row()]))
     },
   })
 

@@ -55,45 +55,55 @@ export function createInMemoryDeletionLedger(
   let records = initialRecords.map(cloneRecord)
 
   return {
-    async append(event) {
-      const existing = records.find((record) => record.idempotencyKey === event.idempotencyKey)
-      if (existing) return cloneRecord(existing)
+    append(event) {
+      try {
+        const existing = records.find((record) => record.idempotencyKey === event.idempotencyKey)
+        if (existing) return Promise.resolve(cloneRecord(existing))
 
-      records = recordDeletionEvent(records, event)
-      const created = records.at(-1)
-      if (!created) throw new Error('ledger_append_failed')
-      return cloneRecord(created)
+        records = recordDeletionEvent(records, event)
+        const created = records.at(-1)
+        if (!created) throw new Error('ledger_append_failed')
+        return Promise.resolve(cloneRecord(created))
+      } catch (error) {
+        return Promise.reject(error)
+      }
     },
 
-    async listForRestore(subject) {
-      return records
-        .filter((record) => subject === undefined || record.subject === subject)
-        .map(cloneRecord)
+    listForRestore(subject) {
+      return Promise.resolve(
+        records
+          .filter((record) => subject === undefined || record.subject === subject)
+          .map(cloneRecord),
+      )
     },
 
-    async transition(input) {
-      const index = records.findIndex((record) => record.idempotencyKey === input.idempotencyKey)
-      if (index < 0) throw new Error('ledger_event_not_found')
-      const current = records[index]
-      if (current.subject !== input.subject) throw new Error('ledger_subject_mismatch')
-      assertLedgerTransition(current.status, input.status)
-      if (input.status === 'failed' && !input.failureCode) throw new Error('failure_code_required')
-      if (current.status === input.status) {
-        if (input.status === 'failed' && current.failureCode !== input.failureCode) {
-          throw new Error('invalid_ledger_transition')
+    transition(input) {
+      try {
+        const index = records.findIndex((record) => record.idempotencyKey === input.idempotencyKey)
+        if (index < 0) throw new Error('ledger_event_not_found')
+        const current = records[index]
+        if (current.subject !== input.subject) throw new Error('ledger_subject_mismatch')
+        assertLedgerTransition(current.status, input.status)
+        if (input.status === 'failed' && !input.failureCode) throw new Error('failure_code_required')
+        if (current.status === input.status) {
+          if (input.status === 'failed' && current.failureCode !== input.failureCode) {
+            throw new Error('invalid_ledger_transition')
+          }
+          return Promise.resolve(cloneRecord(current))
         }
-        return cloneRecord(current)
-      }
 
-      const next: DeletionRecord = {
-        ...current,
-        status: input.status,
-        appliedAt: input.status === 'applied' ? input.at : current.appliedAt,
-        verifiedAt: input.status === 'verified' ? input.at : current.verifiedAt,
-        failureCode: input.status === 'failed' ? input.failureCode : input.status === 'applied' ? undefined : current.failureCode,
+        const next: DeletionRecord = {
+          ...current,
+          status: input.status,
+          appliedAt: input.status === 'applied' ? input.at : current.appliedAt,
+          verifiedAt: input.status === 'verified' ? input.at : current.verifiedAt,
+          failureCode: input.status === 'failed' ? input.failureCode : input.status === 'applied' ? undefined : current.failureCode,
+        }
+        records = [...records.slice(0, index), next, ...records.slice(index + 1)]
+        return Promise.resolve(cloneRecord(next))
+      } catch (error) {
+        return Promise.reject(error)
       }
-      records = [...records.slice(0, index), next, ...records.slice(index + 1)]
-      return cloneRecord(next)
     },
   }
 }
