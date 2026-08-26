@@ -28,7 +28,15 @@ CREATE INDEX IF NOT EXISTS idx_event_series_lifecycle
   ON public.event_series(lifecycle_status) 
   WHERE lifecycle_status != 'draft';
 
--- Trigger for updated_at (shared function already exists from previous migration)
+-- Shared updated_at trigger function (idempotent; schema spec requires it)
+CREATE OR REPLACE FUNCTION public.set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = timezone('utc', now());
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 DROP TRIGGER IF EXISTS trg_event_series_updated_at ON public.event_series;
 CREATE TRIGGER trg_event_series_updated_at
   BEFORE UPDATE ON public.event_series
