@@ -1,11 +1,14 @@
 import {
   buildMinimalPushPayload,
+  canSendToProvider,
   classifyProviderResponse,
   createDeliveryIdempotencyKey,
   createSyntheticDeliveryRecord,
   applySyntheticOutcome,
   claimSyntheticDelivery,
   deleteSyntheticSubscription,
+  fenceSyntheticDeliveryCancelled,
+  moveSyntheticSubscriptionOwnership,
   replaySyntheticDelivery,
   retryDelayMs,
 } from './web-push-delivery.ts'
@@ -97,4 +100,26 @@ Deno.test('404/410 invalidates endpoint and deletion prevents replay', async () 
   deadLetter = applySyntheticOutcome(claimSyntheticDelivery(deadLetter), 'permanent_failure')
   deadLetter = deleteSyntheticSubscription(deadLetter)
   if (replaySyntheticDelivery(deadLetter).status !== 'dead_letter') throw new Error('deleted subscription was replayed')
+})
+
+Deno.test('ownership handover after claim fences the provider call to zero side effects', async () => {
+  const record = await createSyntheticDeliveryRecord(notificationId, profileId)
+  const claimed = claimSyntheticDelivery(record)
+  if (!canSendToProvider(claimed)) throw new Error('expected sendable after a clean claim')
+
+  const moved = moveSyntheticSubscriptionOwnership(claimed)
+  if (canSendToProvider(moved)) throw new Error('provider must not be called across an ownership handover')
+  const cancelled = fenceSyntheticDeliveryCancelled(moved)
+  if (cancelled.status !== 'cancelled') throw new Error('expected fenced terminal cancellation')
+  if (applySyntheticOutcome(cancelled, 'success').status !== 'cancelled') {
+    throw new Error('cancelled must be terminal against provider outcomes')
+  }
+  if (replaySyntheticDelivery(cancelled).status !== 'cancelled') throw new Error('cancelled must not replay')
+  if (claimSyntheticDelivery(cancelled).status !== 'cancelled') throw new Error('cancelled must not re-claim')
+  if (fenceSyntheticDeliveryCancelled(cancelled).status !== 'cancelled') {
+    throw new Error('cancellation must be idempotent')
+  }
+
+  const control = applySyntheticOutcome(claimSyntheticDelivery(await createSyntheticDeliveryRecord(eventId, profileId)), 'success')
+  if (control.status !== 'sent') throw new Error('control path without handover must deliver exactly once')
 })

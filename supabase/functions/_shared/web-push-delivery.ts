@@ -22,7 +22,13 @@ export interface MinimalPushPayload {
 
 export type ProviderOutcome = 'success' | 'retryable' | 'endpoint_invalid' | 'permanent_failure'
 
-export type SyntheticDeliveryStatus = 'pending' | 'processing' | 'sent' | 'endpoint_invalid' | 'dead_letter'
+export type SyntheticDeliveryStatus =
+  | 'pending'
+  | 'processing'
+  | 'sent'
+  | 'endpoint_invalid'
+  | 'dead_letter'
+  | 'cancelled'
 
 export interface SyntheticDeliveryRecord {
   idempotencyKey: string
@@ -31,6 +37,8 @@ export interface SyntheticDeliveryRecord {
   status: SyntheticDeliveryStatus
   attempts: number
   subscriptionActive: boolean
+  subscriptionOwnerGeneration: number
+  claimedOwnerGeneration?: number
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -95,12 +103,30 @@ export async function createSyntheticDeliveryRecord(
     status: 'pending',
     attempts: 0,
     subscriptionActive: true,
+    subscriptionOwnerGeneration: 0,
   }
 }
 
 export function claimSyntheticDelivery(record: SyntheticDeliveryRecord): SyntheticDeliveryRecord {
   if (record.status !== 'pending') return { ...record }
-  return { ...record, status: 'processing' }
+  return { ...record, status: 'processing', claimedOwnerGeneration: record.subscriptionOwnerGeneration }
+}
+
+export function moveSyntheticSubscriptionOwnership(record: SyntheticDeliveryRecord): SyntheticDeliveryRecord {
+  return { ...record, subscriptionOwnerGeneration: record.subscriptionOwnerGeneration + 1 }
+}
+
+export function canSendToProvider(record: SyntheticDeliveryRecord): boolean {
+  return (
+    record.status === 'processing' &&
+    record.subscriptionActive &&
+    record.claimedOwnerGeneration === record.subscriptionOwnerGeneration
+  )
+}
+
+export function fenceSyntheticDeliveryCancelled(record: SyntheticDeliveryRecord): SyntheticDeliveryRecord {
+  if (record.status !== 'processing') return { ...record }
+  return { ...record, status: 'cancelled' }
 }
 
 export function applySyntheticOutcome(
@@ -109,7 +135,14 @@ export function applySyntheticOutcome(
   maxAttempts = 3,
 ): SyntheticDeliveryRecord {
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) throw new Error('invalid_max_attempts')
-  if (record.status === 'sent' || record.status === 'endpoint_invalid' || record.status === 'dead_letter') return { ...record }
+  if (
+    record.status === 'sent' ||
+    record.status === 'endpoint_invalid' ||
+    record.status === 'dead_letter' ||
+    record.status === 'cancelled'
+  ) {
+    return { ...record }
+  }
 
   const attempts = record.attempts + 1
   if (outcome === 'success') return { ...record, status: 'sent', attempts }
