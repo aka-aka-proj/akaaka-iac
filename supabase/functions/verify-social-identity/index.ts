@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from '@supabase/supabase-js'
 import { findProviderIdentity, normalizePlatform, toSocialIdentityRecord } from '../_shared/social-identity.ts'
 
 const corsHeaders = {

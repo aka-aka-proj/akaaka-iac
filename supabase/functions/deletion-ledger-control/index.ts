@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from '@supabase/supabase-js'
 import { createCloudflareDeletionLedger } from '../_shared/cloudflare-deletion-ledger.ts'
 import { isAdminAal2, parseStageLedgerRequest, readJwtPayload, toSafeLedgerRecord } from '../_shared/deletion-ledger-control.ts'
 
