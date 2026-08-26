@@ -1,0 +1,1 @@
+-- [gate-verification] dummy migration: 僅供驗證 contract-gate 對缺宣告 PR 的攔截（iac#91 第 4 項），不含任何 DDL，PR 不會被合併。
