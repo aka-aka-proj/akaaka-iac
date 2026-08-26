@@ -154,6 +154,9 @@ GRANT EXECUTE ON FUNCTION public.get_event_series_capacity(UUID) TO authenticate
 -- Enable RLS on event_series
 ALTER TABLE public.event_series ENABLE ROW LEVEL SECURITY;
 
+-- Membership rows are exposed through the Data API and must be protected too.
+ALTER TABLE public.event_series_membership ENABLE ROW LEVEL SECURITY;
+
 -- RLS policies for event_series
 -- Users can read their own series
 DROP POLICY IF EXISTS event_series_owner_read ON public.event_series;
@@ -173,6 +176,13 @@ CREATE POLICY event_series_public_read
     lifecycle_status = 'published' 
     AND creator_id IN (SELECT id FROM public.profiles)
   );
+
+DROP POLICY IF EXISTS event_series_public_read_authenticated ON public.event_series;
+CREATE POLICY event_series_public_read_authenticated
+  ON public.event_series
+  FOR SELECT
+  TO authenticated
+  USING (lifecycle_status = 'published');
 
 -- Only owners can insert/update their series
 DROP POLICY IF EXISTS event_series_owner_insert ON public.event_series;
@@ -204,6 +214,19 @@ CREATE POLICY event_series_membership_select
     )
   );
 
+DROP POLICY IF EXISTS event_series_membership_owner_read ON public.event_series_membership;
+CREATE POLICY event_series_membership_owner_read
+  ON public.event_series_membership
+  FOR SELECT
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.event_series es
+      WHERE es.id = series_id
+      AND es.creator_id = auth.uid()
+    )
+  );
+
 DROP POLICY IF EXISTS event_series_membership_insert ON public.event_series_membership;
 CREATE POLICY event_series_membership_insert 
   ON public.event_series_membership 
@@ -213,6 +236,49 @@ CREATE POLICY event_series_membership_insert
     EXISTS (
       SELECT 1 FROM public.event_series es
       WHERE es.id = series_id 
+      AND es.creator_id = auth.uid()
+    )
+    AND EXISTS (
+      SELECT 1 FROM public.events e
+      WHERE e.id = event_id
+      AND e.creator_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS event_series_membership_update ON public.event_series_membership;
+CREATE POLICY event_series_membership_update
+  ON public.event_series_membership
+  FOR UPDATE
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.event_series es
+      WHERE es.id = series_id
+      AND es.creator_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.event_series es
+      WHERE es.id = series_id
+      AND es.creator_id = auth.uid()
+    )
+    AND EXISTS (
+      SELECT 1 FROM public.events e
+      WHERE e.id = event_id
+      AND e.creator_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS event_series_membership_delete ON public.event_series_membership;
+CREATE POLICY event_series_membership_delete
+  ON public.event_series_membership
+  FOR DELETE
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.event_series es
+      WHERE es.id = series_id
       AND es.creator_id = auth.uid()
     )
   );
