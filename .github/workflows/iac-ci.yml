@@ -222,11 +222,11 @@ jobs:
 
       - name: Deno lint functions
         if: matrix.target.name == 'functions'
-        run: deno lint supabase/functions/
+        run: deno lint --config supabase/functions/deno.json supabase/functions/
 
       - name: Type-check function entrypoints
         if: matrix.target.name == 'functions'
-        run: deno check supabase/functions/*/index.ts
+        run: deno check --config supabase/functions/deno.json supabase/functions/*/index.ts
 
       - name: Run Deno unit tests
         if: matrix.target.name == 'functions'
