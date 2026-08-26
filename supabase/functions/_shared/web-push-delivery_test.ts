@@ -5,10 +5,13 @@ import {
   createSyntheticDeliveryRecord,
   applySyntheticOutcome,
   claimSyntheticDelivery,
+  deliverSyntheticOnce,
   deleteSyntheticSubscription,
+  moveSyntheticSubscriptionOwnership,
   replaySyntheticDelivery,
   retryDelayMs,
 } from './web-push-delivery.ts'
+import type { ProviderOutcome } from './web-push-delivery.ts'
 
 const notificationId = '00000000-0000-4000-8000-000000000001'
 const eventId = '00000000-0000-4000-8000-000000000002'
@@ -97,4 +100,32 @@ Deno.test('404/410 invalidates endpoint and deletion prevents replay', async () 
   deadLetter = applySyntheticOutcome(claimSyntheticDelivery(deadLetter), 'permanent_failure')
   deadLetter = deleteSyntheticSubscription(deadLetter)
   if (replaySyntheticDelivery(deadLetter).status !== 'dead_letter') throw new Error('deleted subscription was replayed')
+})
+
+Deno.test('ownership handover after claim fences the provider call to zero side effects', async () => {
+  const calls: { count: number } = { count: 0 }
+  const send = (): ProviderOutcome => {
+    calls.count += 1
+    return 'success'
+  }
+  const assertCalls = (expected: number): void => {
+    if (calls.count !== expected) throw new Error(`unexpected provider calls: ${calls.count}`)
+  }
+
+  const claimed = claimSyntheticDelivery(await createSyntheticDeliveryRecord(notificationId, profileId))
+  const fenced = deliverSyntheticOnce(moveSyntheticSubscriptionOwnership(claimed), send)
+  assertCalls(0)
+  if (fenced.record.status !== 'cancelled') throw new Error('expected fenced terminal cancellation')
+  if (applySyntheticOutcome(fenced.record, 'success').status !== 'cancelled') {
+    throw new Error('cancelled must be terminal against provider outcomes')
+  }
+  if (replaySyntheticDelivery(fenced.record).status !== 'cancelled') throw new Error('cancelled must not replay')
+  if (claimSyntheticDelivery(fenced.record).status !== 'cancelled') throw new Error('cancelled must not re-claim')
+
+  const control = deliverSyntheticOnce(
+    claimSyntheticDelivery(await createSyntheticDeliveryRecord(eventId, profileId)),
+    send,
+  )
+  assertCalls(1)
+  if (control.record.status !== 'sent') throw new Error('control path must deliver')
 })
