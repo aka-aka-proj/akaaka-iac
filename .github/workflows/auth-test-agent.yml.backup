@@ -14,7 +14,7 @@ on:
           - cleanup
 
 concurrency:
-  group: auth-test-agent-staging  # 共用 staging 資源，避免同時操作衝突
+  group: auth-test-agent-${{ github.ref }}
   cancel-in-progress: false
 
 env:
