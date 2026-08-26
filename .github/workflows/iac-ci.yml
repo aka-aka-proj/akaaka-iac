@@ -15,6 +15,11 @@ on:
       - ".github/workflows/web-push-delivery-scheduler.yml"
       - ".github/workflows/web-push-cleanup-scheduler.yml"
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to validate with the compatibility/docs gate"
+        required: true
+        type: number
 
 permissions:
   contents: read
@@ -283,7 +288,7 @@ jobs:
     name: Compatibility & docs-first declaration gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pr_number != '')
     permissions:
       contents: read
       pull-requests: read
@@ -293,7 +298,7 @@ jobs:
       # 步驟內顯式報錯而非讓所有 gh 呼叫以 exit 4 空白崩潰
       GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN || github.token }}
       CROSS_REPO_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
       DOCS_REPO: aka-aka-proj/akaaka-docs
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
