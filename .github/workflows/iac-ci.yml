@@ -10,7 +10,6 @@ on:
       - "supabase/tests/**"
       - "supabase/ledger/**"
       - "supabase/functions/**"
-      - "supabase/functions/**"
       - "cloudflare/**"
       - ".github/workflows/iac-ci.yml"
       - ".github/workflows/web-push-delivery-scheduler.yml"
