@@ -213,6 +213,17 @@ jobs:
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
+
+      - name: Set up Deno
+        if: matrix.target.name == 'functions'
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+
+      - name: Run Deno unit tests
+        if: matrix.target.name == 'functions'
+        run: deno test --allow-all --check supabase/functions/_shared/
+
       - name: Check external registration boundary
         if: matrix.target.name == 'functions'
         run: |
