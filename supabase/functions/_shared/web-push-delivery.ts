@@ -22,19 +22,15 @@ export interface MinimalPushPayload {
 
 export type ProviderOutcome = 'success' | 'retryable' | 'endpoint_invalid' | 'permanent_failure'
 
-export type SyntheticDeliveryStatus =
-  | 'pending'
-  | 'processing'
-  | 'sent'
-  | 'endpoint_invalid'
-  | 'dead_letter'
-  | 'cancelled'
+export type SyntheticDeliveryStatus = 'pending' | 'processing' | 'sent' | 'endpoint_invalid' | 'dead_letter'
+
+export type SyntheticDeliveryLifecycleStatus = SyntheticDeliveryStatus | 'cancelled'
 
 export interface SyntheticDeliveryRecord {
   idempotencyKey: string
   notificationId: string
   subscriptionId: string
-  status: SyntheticDeliveryStatus
+  status: SyntheticDeliveryLifecycleStatus
   attempts: number
   subscriptionActive: boolean
   subscriptionOwnerGeneration: number
