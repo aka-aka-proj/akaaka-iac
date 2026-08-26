@@ -343,16 +343,30 @@ jobs:
             patch="$(jq -r --arg f "$fname" '[.[] | select(.filename == $f)][0].patch // ""' /tmp/pr_files_flat.json)"
             case "$fname" in
               supabase/migrations/*)
-                # 兩類新增行屬例行防護而非相容性破壞，偵測前先剝除：
+                # 三類新增行屬例行防護而非相容性破壞，偵測前先剝除：
                 # 1) REVOKE ... ON FUNCTION ... FROM PUBLIC——函式 EXECUTE 權限
                 #    硬化（歷來 migration 標準配管），不改變任何資料可及性；
                 # 2) DROP ... IF EXISTS——冪等守衛式清理，目標物件本就可能
                 #    不存在，不構成對既有保證的撤回。
+                # 3) REVOKE ... ON <同一 patch 內以 CREATE TABLE IF NOT EXISTS
+                #    新建的表>——新物件的 deny-by-default 權限配管（RLS matrix
+                #    canonical DDL 的一部分）；物件此前不存在，撤銷不可能收回
+                #    任何既有客戶端能力。殘餘風險：對既有表重複 CREATE IF NOT
+                #    EXISTS 後同檔 REVOKE 也會被豁免——由 review 層把關，與本
+                #    啟發式閘門「動態 SQL 從寬」的既有定位一致。
                 plus_lines="$(printf '%s' "$patch" | grep '^+' || true)"
                 contract_lines="$(printf '%s\n' "$plus_lines" \
                   | grep -Ev 'REVOKE[^;]*ON[[:space:]]+FUNCTION' \
                   | grep -Ev 'DROP[[:space:]]+(TABLE|COLUMN|CONSTRAINT|POLICY|FUNCTION|SCHEMA)[[:space:]]+IF[[:space:]]+EXISTS' \
                   || true)"
+                created_objs="$(printf '%s\n' "$plus_lines" \
+                  | sed -nE 's/^\+[[:space:]]*CREATE[[:space:]]+TABLE[[:space:]]+(IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+)?([A-Za-z_][A-Za-z0-9_.]*).*/\2/p' \
+                  | awk -F. '{print $NF}' | sort -u | tr '\n' '|' | sed 's/|$//')"
+                if [ -n "$created_objs" ]; then
+                  contract_lines="$(printf '%s\n' "$contract_lines" \
+                    | grep -Eiv "REVOKE[^;]*ON[[:space:]]+(TABLE[[:space:]]+)?[A-Za-z0-9_.]*($created_objs)([[:space:];]|$)" \
+                    || true)"
+                fi
                 hits="$(printf '%s\n' "$contract_lines" | grep -Ei "$mig_pat" || true)"
                 if [ -n "$hits" ]; then detected="migrations:$fname"; fi
                 ;;
