@@ -16,6 +16,22 @@ function errorResponse(code: string, message: string, status: number): Response 
   return jsonResponse({ error: { code, message } }, status)
 }
 
+interface SeriesEventRow {
+  id: string
+  creator_id: string
+  max_capacity: number | null
+  registration_deadline: string | null
+  external_registration_url: string | null
+  lifecycle_status: string
+  publication_status: string
+}
+
+interface SeriesMemberRow {
+  event_id: string
+  position: number
+  event: SeriesEventRow | null
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (req.method !== 'POST') return errorResponse('validation_error', 'Only POST is supported', 400)
@@ -92,44 +108,40 @@ Deno.serve(async (req: Request) => {
     }
 
     // 4. Validate all events are accessible
-    const firstMember = members[0] as Record<string, unknown>
-    const events = (firstMember.event ? members.map((m: Record<string, unknown>) => m.event) : []) as Array<Record<string, unknown>>
+    const typedMembers = members as SeriesMemberRow[]
+    const events: SeriesEventRow[] = typedMembers
+      .map((m: SeriesMemberRow) => m.event)
+      .filter((e: SeriesEventRow | null): e is SeriesEventRow => e !== null)
 
     for (const event of events) {
-      if (!event || !event.id) {
-        return errorResponse('not_found', 'One or more member events not found', 404)
-      }
-
-      if ((event as any).external_registration_url) {
+      if (event.external_registration_url) {
         return errorResponse('external_registration', 'One or more events use external registration', 400)
       }
 
-      if ((event as any).lifecycle_status === 'cancelled' || (event as any).publication_status === 'closed') {
+      if (event.lifecycle_status === 'cancelled' || event.publication_status === 'closed') {
         return errorResponse('event_closed', `Event ${event.id} is not open for registration`, 400)
       }
 
-      if ((event as any).registration_deadline && new Date((event as any).registration_deadline) < new Date()) {
+      if (event.registration_deadline && new Date(event.registration_deadline) < new Date()) {
         return errorResponse('registration_closed', `Registration deadline has passed for event ${event.id}`, 400)
       }
 
-      if ((event as any).creator_id === user.id) {
+      if (event.creator_id === user.id) {
         return errorResponse('host_cannot_register', `You are the host of event ${event.id}`, 400)
       }
     }
 
     // 5. Validate capacity for all events (for whole_series_registration)
-    // For each event, check if there is available capacity
     for (const event of events) {
-      const maxCap = (event as any).max_capacity
-      if (maxCap != null) {
+      if (event.max_capacity != null) {
         const { count: approvedCount } = await serviceClient
           .from('event_registrations')
           .select('id', { count: 'exact', head: true })
-          .eq('event_id', (event as any).id)
+          .eq('event_id', event.id)
           .neq('status', 'cancelled')
 
-        if (approvedCount != null && approvedCount >= maxCap) {
-          return errorResponse('capacity_exhausted', `Event ${(event as any).id} is at full capacity`, 400)
+        if (approvedCount != null && approvedCount >= event.max_capacity) {
+          return errorResponse('capacity_exhausted', `Event ${event.id} is at full capacity`, 400)
         }
       }
     }
@@ -172,7 +184,7 @@ Deno.serve(async (req: Request) => {
       const { data: eventReg, error: eventRegError } = await serviceClient
         .from('event_registrations')
         .insert({
-          event_id: (event as any).id,
+          event_id: event.id,
           profile_id: user.id,
           status: 'approved',
         })
@@ -181,7 +193,7 @@ Deno.serve(async (req: Request) => {
 
       if (eventRegError) {
         failedCount++
-        console.error(`Failed to create registration for event ${(event as any).id}:`, eventRegError)
+        console.error(`Failed to create registration for event ${event.id}:`, eventRegError)
       } else {
         registrationIds.push(eventReg.id)
       }
