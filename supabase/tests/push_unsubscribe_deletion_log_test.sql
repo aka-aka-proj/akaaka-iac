@@ -7,7 +7,7 @@ BEGIN;
 -- read runs as the reset superuser, because push_subscriptions RLS hides
 -- foreign rows and the deletion log is invisible to browser roles by design.
 
-SELECT plan(48);
+SELECT plan(63);
 
 -- Structural contracts -------------------------------------------------------
 
@@ -53,6 +53,16 @@ SELECT ok(
       AND c.confdeltype = 'c'
   ),
   'last_owner_profile_id references profiles with ON DELETE CASCADE'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename = 'push_subscriptions_deletion_log'
+      AND indexdef LIKE '%last_owner_profile_id%'
+  ),
+  'tombstone owner foreign key carries a support index for cascade deletes'
 );
 
 SELECT ok(
@@ -284,6 +294,75 @@ SELECT is(
   'the regression guard holds: refresh without a tombstone creates nothing'
 );
 
+-- Deferred revocation while a delivery send lease is active ------------------
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000401', true);
+SELECT lives_ok(
+  $$SELECT public.subscribe_push_subscription(
+    'https://push.local/def1', 'du', 'da', 'UA-defer'
+  )$$,
+  'the deferral fixture endpoint starts as a live binding'
+);
+
+RESET ROLE;
+INSERT INTO public.notifications (recipient_profile_id, notification_type, title, actor_profile_id)
+VALUES ('00000000-0000-4000-8000-000000000401', 'new_follow', 'Defer follow', '00000000-0000-4000-8000-000000000402');
+
+UPDATE public.notification_push_deliveries d
+SET status = 'processing',
+    claimed_at = timezone('utc', now())
+FROM public.push_subscriptions ps
+WHERE ps.endpoint = 'https://push.local/def1'
+  AND d.push_subscription_id = ps.id;
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000401', true);
+SELECT throws_ok(
+  $$SELECT public.unsubscribe_push_subscription(
+    'https://push.local/def1', 'du', 'da'
+  )$$,
+  'P0001',
+  'revocation_deferred',
+  'revocation is deferred while an unexpired delivery send lease is active'
+);
+
+RESET ROLE;
+SELECT is(
+  (SELECT count(*)::integer FROM public.push_subscriptions WHERE endpoint = 'https://push.local/def1'),
+  1,
+  'a deferred revocation leaves the binding in place'
+);
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.push_subscriptions_deletion_log
+    WHERE endpoint = 'https://push.local/def1'),
+  0,
+  'a deferred revocation writes no tombstone'
+);
+
+UPDATE public.notification_push_deliveries d
+SET claimed_at = timezone('utc', now()) - interval '10 minutes'
+FROM public.push_subscriptions ps
+WHERE ps.endpoint = 'https://push.local/def1'
+  AND d.push_subscription_id = ps.id;
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000401', true);
+SELECT is(
+  public.unsubscribe_push_subscription('https://push.local/def1', 'du', 'da'),
+  true,
+  'revocation succeeds once the send lease has expired'
+);
+
+RESET ROLE;
+SELECT is(
+  (SELECT deletion_source FROM public.push_subscriptions_deletion_log
+    WHERE endpoint = 'https://push.local/def1'),
+  'user_revoked',
+  'the post-deferral revocation records user revocation intent'
+);
+
 SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000402', true);
 SELECT ok(
@@ -413,6 +492,72 @@ SELECT is(
     WHERE endpoint = 'https://push.local/clean3'),
   0,
   'no binding was recreated by any passive rejection path'
+);
+
+-- Cleanup never overwrites a residual user_revoked marker --------------------
+
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000403', true);
+SELECT lives_ok(
+  $$SELECT public.subscribe_push_subscription(
+    'https://push.local/guarded', 'gu', 'ga', 'UA-guard'
+  )$$,
+  'the guarded endpoint starts as a live binding'
+);
+
+SELECT is(
+  public.unsubscribe_push_subscription('https://push.local/guarded', 'gu', 'ga'),
+  true,
+  'the owner revokes the guarded endpoint, leaving a user_revoked marker'
+);
+
+RESET ROLE;
+INSERT INTO public.push_subscriptions (profile_id, endpoint, p256dh, auth, updated_at)
+VALUES ('00000000-0000-4000-8000-000000000403', 'https://push.local/guarded', 'gu2', 'ga2',
+        timezone('utc', now()) - interval '400 days');
+
+SELECT is(
+  (SELECT deletion_source FROM public.push_subscriptions_deletion_log
+    WHERE endpoint = 'https://push.local/guarded'),
+  'user_revoked',
+  'a legacy direct-INSERT rebuild coexists with the surviving marker'
+);
+
+SET LOCAL ROLE service_role;
+SELECT is(
+  public.cleanup_stale_push_subscriptions(90),
+  1,
+  'cleanup deletes the rebuilt stale row while keeping the protected marker'
+);
+
+RESET ROLE;
+SELECT is(
+  (SELECT deletion_source FROM public.push_subscriptions_deletion_log
+    WHERE endpoint = 'https://push.local/guarded'),
+  'user_revoked',
+  'cleanup does not overwrite a residual user_revoked marker'
+);
+
+SELECT is(
+  (SELECT last_owner_profile_id FROM public.push_subscriptions_deletion_log
+    WHERE endpoint = 'https://push.local/guarded'),
+  '00000000-0000-4000-8000-000000000403'::uuid,
+  'the protected marker keeps its original owner'
+);
+
+SELECT is(
+  (SELECT key_material_fingerprint FROM public.push_subscriptions_deletion_log
+    WHERE endpoint = 'https://push.local/guarded'),
+  (SELECT public.push_subscription_key_fingerprint('gu', 'ga')),
+  'the protected marker keeps its original key fingerprint'
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1 FROM public.push_subscriptions
+     WHERE endpoint = 'https://push.local/guarded'
+  ),
+  'the stale rebuilt row itself was still deleted'
 );
 
 SET LOCAL ROLE service_role;

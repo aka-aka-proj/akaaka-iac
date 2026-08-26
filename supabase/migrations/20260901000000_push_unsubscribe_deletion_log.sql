@@ -5,10 +5,13 @@
 --      a binding disappeared, keeping a one-way key-material fingerprint so
 --      only the proven last owner can passively rebuild or record revocation.
 --   2) unsubscribe_push_subscription: the only authorized explicit-disable
---      path; SECURITY DEFINER, possession-proof gated, writes/overwrites the
---      tombstone with deletion_source='user_revoked' in the same transaction.
+--      path; SECURITY DEFINER, possession-proof gated, defers while an
+--      unexpired delivery send lease is active (revocation_deferred), and
+--      writes/overwrites the tombstone with deletion_source='user_revoked'
+--      in the same transaction.
 --   3) cleanup_stale_push_subscriptions now leaves a 'scheduled_cleanup'
---      tombstone in the same transaction as each delete.
+--      tombstone in the same transaction as each delete, never overwriting
+--      a residual 'user_revoked' marker.
 --   4) subscribe_push_subscription refresh mode rebuilds a deleted binding
 --      only when the tombstone proves scheduled_cleanup + same last owner +
 --      matching fingerprint; every other no-row refresh returns NULL instead
@@ -29,6 +32,12 @@ CREATE TABLE IF NOT EXISTS public.push_subscriptions_deletion_log (
   deleted_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()),
   CONSTRAINT push_subscriptions_deletion_log_endpoint_not_blank CHECK (length(trim(endpoint)) > 0)
 );
+
+-- Support index: last_owner_profile_id carries profiles ON DELETE CASCADE and
+-- unreconstructed revocation/cleanup tombstones accumulate forever, so every
+-- account deletion would otherwise cascade via a full tombstone scan.
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_deletion_log_last_owner
+  ON public.push_subscriptions_deletion_log (last_owner_profile_id);
 
 ALTER TABLE public.push_subscriptions_deletion_log ENABLE ROW LEVEL SECURITY;
 
@@ -106,6 +115,28 @@ BEGIN
     IF v_row.profile_id = v_profile_id
        AND v_row.p256dh = trim(p_p256dh)
        AND v_row.auth = trim(p_auth) THEN
+      -- Same fencing domain as the ownership move and cleanup: lock this
+      -- binding's delivery rows first so an uncommitted pending→processing
+      -- claim flip becomes visible to the predicate below, then defer while
+      -- an unexpired send lease still has a worker mid-send. Without this,
+      -- a worker past its final subscription re-read would keep sending to
+      -- an endpoint the user has just explicitly disabled.
+      PERFORM 1
+        FROM public.notification_push_deliveries d
+       WHERE d.push_subscription_id = v_row.id
+       ORDER BY d.id
+          FOR UPDATE;
+
+      IF EXISTS (
+        SELECT 1
+          FROM public.notification_push_deliveries d
+         WHERE d.push_subscription_id = v_row.id
+           AND d.status = 'processing'
+           AND d.claimed_at >= timezone('utc', now()) - interval '5 minutes'
+      ) THEN
+        RAISE EXCEPTION 'revocation_deferred';
+      END IF;
+
       DELETE FROM public.push_subscriptions WHERE id = v_row.id;
 
       INSERT INTO public.push_subscriptions_deletion_log (
@@ -218,16 +249,21 @@ BEGIN
            'scheduled_cleanup',
            public.push_subscription_key_fingerprint(p256dh, auth)
       FROM deleted
+    -- Revocation intent outranks cleanup origin: a residual user_revoked
+    -- marker (legacy direct-INSERT rebuilt row later cleaned up) must keep
+    -- its original owner and fingerprint, or a matching refresh could
+    -- resurrect an endpoint the user explicitly disabled.
     ON CONFLICT (endpoint) DO UPDATE
       SET last_owner_profile_id = EXCLUDED.last_owner_profile_id,
           deletion_source = EXCLUDED.deletion_source,
           key_material_fingerprint = EXCLUDED.key_material_fingerprint,
           deleted_at = timezone('utc', now())
+      WHERE public.push_subscriptions_deletion_log.deletion_source <> 'user_revoked'
     RETURNING 1
   )
   SELECT count(*)::INTEGER
     INTO v_deleted
-    FROM marked;
+    FROM deleted;
 
   RETURN COALESCE(v_deleted, 0);
 END;
