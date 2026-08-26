@@ -1,5 +1,5 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   calculateApprovalRate,
   calculateAttendanceRate,
@@ -29,7 +29,7 @@ type ClientFactory = (
   url: string,
   key: string,
   options?: Record<string, unknown>,
-) => SupabaseClient<any>;
+) => SupabaseClient;
 
 export function createAnalyticsHandler(
   clientFactory: ClientFactory = createClient as unknown as ClientFactory,
@@ -368,7 +368,7 @@ if (import.meta.main) {
 }
 
 async function buildStats(
-  serviceClient: SupabaseClient<any>,
+  serviceClient: SupabaseClient,
   targetUserId: string,
   hostedEvents: number,
   hostedTags: string[],
@@ -407,7 +407,7 @@ async function buildStats(
 
 // 加權信譽積分：一般用戶推薦 = score_increment * 1.0；venue_approved 官方場地方 = 1.5
 async function computeWeightedReputation(
-  serviceClient: SupabaseClient<any>,
+  serviceClient: SupabaseClient,
   targetUserId: string,
 ): Promise<number> {
   const { data: recommendations, error } = await serviceClient
@@ -429,7 +429,7 @@ async function computeWeightedReputation(
 
 // 被檢舉頻率：reports 表中 target_profile_id = 該用戶 的數量
 async function computeReportCount(
-  serviceClient: SupabaseClient<any>,
+  serviceClient: SupabaseClient,
   targetUserId: string,
 ): Promise<number> {
   const { count, error } = await serviceClient
@@ -446,7 +446,7 @@ async function computeReportCount(
 }
 
 async function computeExploredTags(
-  serviceClient: SupabaseClient<any>,
+  serviceClient: SupabaseClient,
   targetUserId: string,
   effectiveEventScope: string[] | null,
 ): Promise<string[]> {

@@ -163,7 +163,6 @@ export function validateEditableFields(
 ): string | null {
   if (fields === undefined || fields === null) return null
   const disallowed = ['start_time', 'recurrence_rule', 'source_url', 'is_venue_hosted']
-  const allowed = new Set([...BATCH_FIELDS_WHITELIST, ...disallowed])
   for (const key of Object.keys(fields)) {
     if (disallowed.includes(key)) {
       return `field "${key}" is not allowed in batch edits`

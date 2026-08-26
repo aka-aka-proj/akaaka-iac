@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from '@supabase/supabase-js'
 import { generateRecurringDates, validateRecurrenceRule, RecurrenceSeriesTooLongError, computeInstanceRegistrationDeadline } from '../_shared/recurrence.ts'
 import type { RecurrenceRule } from '../_shared/recurrence.ts'
 

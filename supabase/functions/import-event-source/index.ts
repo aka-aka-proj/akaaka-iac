@@ -77,4 +77,4 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: { code: 'dependency_unavailable', message: 'Source page could not be read' } }, 502)
   }
 })
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from '@supabase/supabase-js'
