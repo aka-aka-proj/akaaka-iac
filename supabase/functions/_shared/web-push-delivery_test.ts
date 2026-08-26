@@ -103,15 +103,18 @@ Deno.test('404/410 invalidates endpoint and deletion prevents replay', async () 
 })
 
 Deno.test('ownership handover after claim fences the provider call to zero side effects', async () => {
-  let providerCalls: number = 0
+  const calls: { count: number } = { count: 0 }
   const send = (): ProviderOutcome => {
-    providerCalls += 1
+    calls.count += 1
     return 'success'
+  }
+  const assertCalls = (expected: number): void => {
+    if (calls.count !== expected) throw new Error(`unexpected provider calls: ${calls.count}`)
   }
 
   const claimed = claimSyntheticDelivery(await createSyntheticDeliveryRecord(notificationId, profileId))
   const fenced = deliverSyntheticOnce(moveSyntheticSubscriptionOwnership(claimed), send)
-  if (providerCalls !== 0) throw new Error('fenced handover must not reach the provider')
+  assertCalls(0)
   if (fenced.record.status !== 'cancelled') throw new Error('expected fenced terminal cancellation')
   if (applySyntheticOutcome(fenced.record, 'success').status !== 'cancelled') {
     throw new Error('cancelled must be terminal against provider outcomes')
@@ -123,6 +126,6 @@ Deno.test('ownership handover after claim fences the provider call to zero side 
     claimSyntheticDelivery(await createSyntheticDeliveryRecord(eventId, profileId)),
     send,
   )
-  if (providerCalls !== 1) throw new Error('clean path must call the provider exactly once')
+  assertCalls(1)
   if (control.record.status !== 'sent') throw new Error('control path must deliver')
 })
