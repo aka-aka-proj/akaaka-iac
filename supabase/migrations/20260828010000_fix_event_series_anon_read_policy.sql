@@ -31,3 +31,51 @@ CREATE POLICY event_series_membership_select
   );
 
 GRANT SELECT ON public.event_series_membership TO anon, authenticated;
+
+DROP POLICY IF EXISTS event_series_membership_insert ON public.event_series_membership;
+CREATE POLICY event_series_membership_insert
+  ON public.event_series_membership
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.event_series es
+      WHERE es.id = public.event_series_membership.series_id
+        AND es.creator_id = auth.uid()
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM public.events e
+      WHERE e.id = public.event_series_membership.event_id
+        AND e.creator_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS event_series_membership_update ON public.event_series_membership;
+CREATE POLICY event_series_membership_update
+  ON public.event_series_membership
+  FOR UPDATE
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.event_series es
+      WHERE es.id = public.event_series_membership.series_id
+        AND es.creator_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.event_series es
+      WHERE es.id = public.event_series_membership.series_id
+        AND es.creator_id = auth.uid()
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM public.events e
+      WHERE e.id = public.event_series_membership.event_id
+        AND e.creator_id = auth.uid()
+    )
+  );
