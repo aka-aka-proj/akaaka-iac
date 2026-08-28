@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(6);
+SELECT plan(7);
 
 SELECT ok(
   EXISTS (
@@ -30,6 +30,18 @@ SELECT ok(
       AND qual LIKE '%publication_status%'
   ),
   'anonymous membership policy requires a published series and event'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'event_series_membership'
+      AND policyname IN ('event_series_membership_insert', 'event_series_membership_update')
+      AND with_check LIKE '%e.creator_id%'
+  ),
+  'membership writes require ownership of the target event'
 );
 
 SET session_replication_role = replica;
