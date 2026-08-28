@@ -19,9 +19,13 @@ CREATE POLICY event_series_membership_select
     EXISTS (
       SELECT 1
       FROM public.event_series es
-      JOIN public.events e ON e.id = event_id
-      WHERE es.id = series_id
+      WHERE es.id = public.event_series_membership.series_id
         AND es.lifecycle_status = 'published'
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM public.events e
+      WHERE e.id = public.event_series_membership.event_id
         AND e.publication_status = 'published'
     )
   );
