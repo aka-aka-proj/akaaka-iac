@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(5);
+SELECT plan(6);
 
 SELECT ok(
   EXISTS (
@@ -68,6 +68,12 @@ SELECT is(
   (SELECT count(*)::integer FROM public.event_series WHERE lifecycle_status = 'draft'),
   0,
   'anonymous clients cannot read draft series'
+);
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.events),
+  1,
+  'anonymous clients can read the published public event fixture'
 );
 
 SELECT is(
