@@ -7,3 +7,5 @@ CREATE POLICY event_series_public_read
   FOR SELECT
   TO anon
   USING (lifecycle_status = 'published');
+
+GRANT SELECT ON public.event_series TO anon, authenticated;
