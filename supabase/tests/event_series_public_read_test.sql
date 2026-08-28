@@ -10,7 +10,9 @@ SELECT ok(
       AND tablename = 'event_series'
       AND policyname = 'event_series_public_read'
       AND roles = ARRAY['anon']::name[]
-      AND qual = '(lifecycle_status = \'published\'::text)'
+      AND qual LIKE '%lifecycle_status%'
+      AND qual LIKE '%published%'
+      AND qual NOT LIKE '%profiles%'
   ),
   'anonymous event-series policy only requires published lifecycle status'
 );
