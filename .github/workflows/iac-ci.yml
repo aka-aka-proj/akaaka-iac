@@ -12,6 +12,8 @@ on:
       - "supabase/functions/**"
       - "cloudflare/**"
       - ".github/workflows/iac-ci.yml"
+      - ".github/workflows/iac-cd.yml"
+      - ".github/workflows/iac-staging-cd.yml"
       - ".github/workflows/web-push-delivery-scheduler.yml"
       - ".github/workflows/web-push-cleanup-scheduler.yml"
   workflow_dispatch:
