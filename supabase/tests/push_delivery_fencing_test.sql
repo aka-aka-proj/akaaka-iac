@@ -95,12 +95,12 @@ VALUES ('00000000-0000-4000-8000-000000000401', 'new_follow', 'Fencing follow', 
 
 -- Claim returns the lease identity ---------------------------------------------
 
-SELECT * FROM public.claim_notification_push_deliveries(25, '2026-08-27 10:00+00', TRUE) AS c
+SELECT * FROM public.claim_notification_push_deliveries(25, '2099-08-27 10:00+00', TRUE) AS c
 \gset fen_
 
 SELECT is(
   :'fen_claimed_at'::timestamptz,
-  '2026-08-27 10:00+00'::timestamptz,
+  '2099-08-27 10:00+00'::timestamptz,
   'claim returns the lease timestamp it stamped'
 );
 
@@ -122,7 +122,7 @@ SELECT is(
   public.settle_push_delivery(
     :'fen_delivery_id'::uuid, :'fen_claimed_at'::timestamptz, :'fen_attempts'::integer,
     :'fen_owner_generation'::integer, :'fen_push_subscription_id'::uuid,
-    'sent', NULL, '2026-08-27 10:00:05+00', NULL, '2026-08-27 10:00:05+00'
+    'sent', NULL, '2099-08-27 10:00:05+00', NULL, '2099-08-27 10:00:05+00'
   ),
   TRUE,
   'a worker holding lease and generation settles its result'
@@ -136,7 +136,7 @@ SELECT is(
 
 SELECT is(
   (SELECT sent_at FROM public.notification_push_deliveries WHERE id = :'fen_delivery_id'::uuid),
-  '2026-08-27 10:00:05+00'::timestamptz,
+  '2099-08-27 10:00:05+00'::timestamptz,
   'settled delivery stamps sent_at'
 );
 
@@ -146,10 +146,10 @@ RESET ROLE;
 INSERT INTO public.notifications (recipient_profile_id, notification_type, title, actor_profile_id)
 VALUES ('00000000-0000-4000-8000-000000000401', 'new_follow', 'Fencing follow 2', '00000000-0000-4000-8000-000000000403');
 
-SELECT * FROM public.claim_notification_push_deliveries(25, '2026-08-27 11:00+00', TRUE) AS c
+SELECT * FROM public.claim_notification_push_deliveries(25, '2099-08-27 11:00+00', TRUE) AS c
 \gset steal_
 
-SELECT * FROM public.claim_notification_push_deliveries(25, '2026-08-27 11:07+00', TRUE) AS c
+SELECT * FROM public.claim_notification_push_deliveries(25, '2099-08-27 11:07+00', TRUE) AS c
 \gset thief_
 
 SELECT ok(
@@ -162,7 +162,7 @@ SELECT is(
   public.settle_push_delivery(
     :'steal_delivery_id'::uuid, :'steal_claimed_at'::timestamptz, :'steal_attempts'::integer,
     :'steal_owner_generation'::integer, :'steal_push_subscription_id'::uuid,
-    'sent', NULL, '2026-08-27 11:06+00', NULL, '2026-08-27 11:06+00'
+    'sent', NULL, '2099-08-27 11:06+00', NULL, '2099-08-27 11:06+00'
   ),
   FALSE,
   'the stale first lease cannot write back after the lease was stolen'
@@ -186,7 +186,7 @@ SELECT is(
   public.settle_push_delivery(
     :'thief_delivery_id'::uuid, :'thief_claimed_at'::timestamptz, :'thief_attempts'::integer,
     :'thief_owner_generation'::integer, :'thief_push_subscription_id'::uuid,
-    'dead_letter', 'provider_http_500', NULL, NULL, '2026-08-27 11:08+00'
+    'dead_letter', 'provider_http_500', NULL, NULL, '2099-08-27 11:08+00'
   ),
   FALSE,
   'a generation mismatch between claim and write-back fences the update'
@@ -217,7 +217,7 @@ DELETE FROM public.notification_push_deliveries
 WHERE push_subscription_id = :'fen_sub_id'::uuid
   AND notification_id = (SELECT id FROM public.notifications WHERE title = 'Fencing follow 3');
 
-SELECT * FROM public.claim_notification_push_deliveries(25, '2026-08-27 11:09+00', TRUE) AS c
+SELECT * FROM public.claim_notification_push_deliveries(25, '2099-08-27 11:09+00', TRUE) AS c
 \gset inv_
 
 -- Simulate an ownership move racing the in-flight worker: the subscription's
@@ -230,7 +230,7 @@ SELECT is(
   public.settle_push_delivery(
     :'inv_delivery_id'::uuid, :'inv_claimed_at'::timestamptz, :'inv_attempts'::integer,
     :'inv_owner_generation'::integer, :'inv_push_subscription_id'::uuid,
-    'endpoint_invalid', 'provider_http_404', NULL, NULL, '2026-08-27 11:10+00'
+    'endpoint_invalid', 'provider_http_404', NULL, NULL, '2099-08-27 11:10+00'
   ),
   FALSE,
   'a worker whose generation went stale cannot trigger the endpoint_invalid deletion'
@@ -253,7 +253,7 @@ SELECT is(
     :'inv_delivery_id'::uuid, :'inv_claimed_at'::timestamptz, :'inv_attempts'::integer,
     (SELECT owner_generation FROM public.push_subscriptions WHERE id = :'inv_push_subscription_id'::uuid),
     :'inv_push_subscription_id'::uuid,
-    'endpoint_invalid', 'provider_http_410', NULL, NULL, '2026-08-27 11:11+00'
+    'endpoint_invalid', 'provider_http_410', NULL, NULL, '2099-08-27 11:11+00'
   ),
   TRUE,
   'the current lease holder settles endpoint_invalid'
