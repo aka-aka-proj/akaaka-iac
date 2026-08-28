@@ -60,7 +60,10 @@ jobs:
         run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
 
       - name: Push staging database migrations
-        run: supabase db push --password "$SUPABASE_DB_PASSWORD"
+        # Preview can receive independently merged migrations out of timestamp
+        # order; include all pending files so a later recorded version does not
+        # prevent the missing schema migration from being applied.
+        run: supabase db push --include-all --password "$SUPABASE_DB_PASSWORD"
 
       - name: Deploy staging Edge Functions
         run: |
