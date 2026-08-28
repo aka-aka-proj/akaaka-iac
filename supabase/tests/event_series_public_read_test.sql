@@ -45,10 +45,10 @@ VALUES
   ('00000000-0000-4000-8000-000000000461', '00000000-0000-4000-8000-000000000451', 'Published Series', 'published'),
   ('00000000-0000-4000-8000-000000000462', '00000000-0000-4000-8000-000000000451', 'Draft Series', 'draft');
 
-INSERT INTO public.events (id, creator_id, title, event_type, start_time, publication_status, lifecycle_status)
+INSERT INTO public.events (id, creator_id, title, event_type, visibility_settings, start_time, publication_status, lifecycle_status)
 VALUES
-  ('00000000-0000-4000-8000-000000000471', '00000000-0000-4000-8000-000000000451', 'Published Event', 'social', now() + interval '1 day', 'published', 'published'),
-  ('00000000-0000-4000-8000-000000000472', '00000000-0000-4000-8000-000000000451', 'Closed Event', 'social', now() + interval '2 days', 'closed', 'published');
+  ('00000000-0000-4000-8000-000000000471', '00000000-0000-4000-8000-000000000451', 'Published Event', 'social', '{"type":"public"}'::jsonb, now() + interval '1 day', 'published', 'published'),
+  ('00000000-0000-4000-8000-000000000472', '00000000-0000-4000-8000-000000000451', 'Closed Event', 'social', '{"type":"public"}'::jsonb, now() + interval '2 days', 'closed', 'published');
 
 INSERT INTO public.event_series_membership (series_id, event_id, position)
 VALUES
