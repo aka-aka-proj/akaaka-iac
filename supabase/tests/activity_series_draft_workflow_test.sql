@@ -5,13 +5,15 @@ SELECT plan(7);
 SELECT has_table('public', 'event_series', 'event_series exists');
 SELECT has_function('public', 'publish_event_series', ARRAY['uuid'], 'publish_event_series exists');
 
-SELECT policy_func IS NOT NULL AS policy_exists
-FROM (
-  SELECT pg_get_expr(polwithcheck, polrelid) AS policy_func
-  FROM pg_policy
-  WHERE polrelid = 'public.event_series'::regclass
-    AND polname = 'event_series_owner_insert'
-) policy_check;
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM pg_policy
+    WHERE polrelid = 'public.event_series'::regclass
+      AND polname = 'event_series_owner_insert'
+  ),
+  'series insert policy exists'
+);
 
 SELECT ok(
   EXISTS (
