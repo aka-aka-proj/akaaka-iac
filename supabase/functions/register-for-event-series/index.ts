@@ -142,15 +142,20 @@ Deno.serve(async (req: Request) => {
         return errorResponse('forbidden', `Event ${event.id} is private and cannot be registered through a public series`, 403)
       }
       if (visibilityType === 'connections_only') {
-        const { data: connection, error: connectionError } = await serviceClient
-          .from('connections')
-          .select('requester_id')
-          .eq('status', 'accepted')
-          .or(`and(requester_id.eq.${user.id},receiver_id.eq.${event.creator_id}),and(requester_id.eq.${event.creator_id},receiver_id.eq.${user.id})`)
-          .limit(1)
+        const { data: followsHost, error: followsHostError } = await serviceClient
+          .from('user_follows')
+          .select('follower_id')
+          .eq('follower_id', user.id)
+          .eq('followed_id', event.creator_id)
           .maybeSingle()
-        if (connectionError) return errorResponse('internal_error', 'Failed to verify event visibility', 500)
-        if (!connection) return errorResponse('forbidden', `You are not connected to the host of event ${event.id}`, 403)
+        const { data: hostFollowsUser, error: hostFollowsUserError } = await serviceClient
+          .from('user_follows')
+          .select('follower_id')
+          .eq('follower_id', event.creator_id)
+          .eq('followed_id', user.id)
+          .maybeSingle()
+        if (followsHostError || hostFollowsUserError) return errorResponse('internal_error', 'Failed to verify event visibility', 500)
+        if (!followsHost || !hostFollowsUser) return errorResponse('forbidden', `You are not connected to the host of event ${event.id}`, 403)
       }
 
       if (event.registration_form_config) {
@@ -179,7 +184,7 @@ Deno.serve(async (req: Request) => {
           .from('event_registrations')
           .select('id', { count: 'exact', head: true })
           .eq('event_id', event.id)
-          .in('status', ['approved', 'pending', 'waitlisted'])
+          .in('status', ['approved', 'pending', 'waitlisted', 'cancellation_pending', 'cancellation_rejected'])
 
         if (approvedCount != null && approvedCount >= event.max_capacity) {
           return errorResponse('capacity_exhausted', `Event ${event.id} is at full capacity`, 400)
@@ -234,6 +239,11 @@ Deno.serve(async (req: Request) => {
       if (eventRegError) {
         console.error(`Failed to create registration for event ${event.id}:`, eventRegError)
         await serviceClient.from('event_registrations').delete().in('id', registrationIds)
+        await serviceClient.from('notifications').delete()
+          .eq('recipient_profile_id', series.creator_id)
+          .eq('notification_type', 'event_series_registration')
+          .eq('event_series_id', seriesId)
+          .eq('actor_profile_id', user.id)
         await serviceClient.from('event_series_registrations').delete().eq('id', seriesRegistration.id)
         return errorResponse('internal_error', 'Failed to register for every member event', 500)
       }
@@ -245,6 +255,11 @@ Deno.serve(async (req: Request) => {
           .insert({ registration_id: eventReg.id, responses: body.form_responses })
         if (responseError) {
           await serviceClient.from('event_registrations').delete().in('id', registrationIds)
+          await serviceClient.from('notifications').delete()
+            .eq('recipient_profile_id', series.creator_id)
+            .eq('notification_type', 'event_series_registration')
+            .eq('event_series_id', seriesId)
+            .eq('actor_profile_id', user.id)
           await serviceClient.from('event_series_registrations').delete().eq('id', seriesRegistration.id)
           return errorResponse('internal_error', 'Failed to save registration responses', 500)
         }
