@@ -22,6 +22,8 @@ interface SeriesEventRow {
   max_capacity: number | null
   registration_deadline: string | null
   external_registration_url: string | null
+  registration_form_config: unknown
+  visibility_settings: unknown
   lifecycle_status: string
   publication_status: string
 }
@@ -93,7 +95,7 @@ Deno.serve(async (req: Request) => {
     // 3. Fetch all member events
     const { data: rawMembers, error: membersError } = await serviceClient
       .from('event_series_membership')
-      .select('event_id, position, event:events(id, creator_id, max_capacity, registration_deadline, external_registration_url, lifecycle_status, publication_status)')
+      .select('event_id, position, event:events(id, creator_id, max_capacity, registration_deadline, external_registration_url, registration_form_config, visibility_settings, lifecycle_status, publication_status)')
       .eq('series_id', seriesId)
       .order('position', { ascending: true })
 
@@ -132,6 +134,42 @@ Deno.serve(async (req: Request) => {
       if (event.creator_id === user.id) {
         return errorResponse('host_cannot_register', `You are the host of event ${event.id}`, 400)
       }
+
+      const visibilityType = typeof event.visibility_settings === 'object' && event.visibility_settings !== null
+        ? (event.visibility_settings as { type?: unknown }).type
+        : undefined
+      if (visibilityType === 'private') {
+        return errorResponse('forbidden', `Event ${event.id} is private and cannot be registered through a public series`, 403)
+      }
+      if (visibilityType === 'connections_only') {
+        const { data: connection, error: connectionError } = await serviceClient
+          .from('connections')
+          .select('requester_id')
+          .eq('status', 'accepted')
+          .or(`and(requester_id.eq.${user.id},receiver_id.eq.${event.creator_id}),and(requester_id.eq.${event.creator_id},receiver_id.eq.${user.id})`)
+          .limit(1)
+          .maybeSingle()
+        if (connectionError) return errorResponse('internal_error', 'Failed to verify event visibility', 500)
+        if (!connection) return errorResponse('forbidden', `You are not connected to the host of event ${event.id}`, 403)
+      }
+
+      if (event.registration_form_config) {
+        const formResponses = body.form_responses ?? {}
+        const config = Array.isArray(event.registration_form_config)
+          ? event.registration_form_config as Array<{ id: string; required?: boolean; type?: string; options?: string[] }>
+          : []
+        for (const field of config) {
+          const value = formResponses[field.id]
+          if (field.required && (value === undefined || value === null || value === '' || value === false)) {
+            return errorResponse('form_validation_error', `Required field '${field.id}' is missing`, 400)
+          }
+          if (field.type === 'select' && field.options && value !== undefined && value !== null && value !== '') {
+            if (!field.options.includes(value as string)) {
+              return errorResponse('form_validation_error', `Invalid value for field '${field.id}'`, 400)
+            }
+          }
+        }
+      }
     }
 
     // 5. Validate capacity for all events (for whole_series_registration)
@@ -141,7 +179,7 @@ Deno.serve(async (req: Request) => {
           .from('event_registrations')
           .select('id', { count: 'exact', head: true })
           .eq('event_id', event.id)
-          .neq('status', 'cancelled')
+          .in('status', ['approved', 'pending', 'waitlisted'])
 
         if (approvedCount != null && approvedCount >= event.max_capacity) {
           return errorResponse('capacity_exhausted', `Event ${event.id} is at full capacity`, 400)
@@ -180,7 +218,6 @@ Deno.serve(async (req: Request) => {
     }
 
     // 8. Create individual event registrations for each member event
-    let failedCount = 0
     const registrationIds: string[] = []
 
     for (const event of events) {
@@ -195,14 +232,25 @@ Deno.serve(async (req: Request) => {
         .single()
 
       if (eventRegError) {
-        failedCount++
         console.error(`Failed to create registration for event ${event.id}:`, eventRegError)
-      } else {
-        registrationIds.push(eventReg.id)
+        await serviceClient.from('event_registrations').delete().in('id', registrationIds)
+        await serviceClient.from('event_series_registrations').delete().eq('id', seriesRegistration.id)
+        return errorResponse('internal_error', 'Failed to register for every member event', 500)
+      }
+      registrationIds.push(eventReg.id)
+
+      if (body.form_responses && event.registration_form_config) {
+        const { error: responseError } = await serviceClient
+          .from('event_registration_responses')
+          .insert({ registration_id: eventReg.id, responses: body.form_responses })
+        if (responseError) {
+          await serviceClient.from('event_registrations').delete().in('id', registrationIds)
+          await serviceClient.from('event_series_registrations').delete().eq('id', seriesRegistration.id)
+          return errorResponse('internal_error', 'Failed to save registration responses', 500)
+        }
       }
     }
 
-    // If any individual registration failed, still succeed but log the warning
     console.log(`Series registration ${seriesRegistration.id}: ${registrationIds.length}/${events.length} event registrations created`)
 
     return jsonResponse({
