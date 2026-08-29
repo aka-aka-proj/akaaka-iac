@@ -173,8 +173,7 @@ CREATE POLICY event_series_public_read
   FOR SELECT 
   TO anon
   USING (
-    lifecycle_status = 'published' 
-    AND creator_id IN (SELECT id FROM public.profiles)
+    lifecycle_status = 'published'
   );
 
 DROP POLICY IF EXISTS event_series_public_read_authenticated ON public.event_series;

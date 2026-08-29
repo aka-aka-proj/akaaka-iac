@@ -482,9 +482,17 @@ jobs:
             # ---- Gate 2：Compatibility 宣告 ＋ evidence-based contract-step gate ----
             contract_flag=0
             for tn in $(resolve_range_prs); do
-              tfiles="$(gh api "repos/$REPO/pulls/$tn/files" --paginate --jq '.[].filename' 2>/dev/null || true)"
+              if ! tfiles="$(gh api "repos/$REPO/pulls/$tn/files" --paginate --jq '.[].filename' 2>/dev/null)"; then
+                result="aborted"
+                detail="cannot read files for task PR #$tn; refusing to evaluate contract gate on unknown diff"
+                exit 1
+              fi
               printf '%s' "$tfiles" | touches_supabase_paths || continue
-              tbody="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null || true)"
+              if ! tbody="$(gh api "repos/$REPO/pulls/$tn" --jq '.body // ""' 2>/dev/null)"; then
+                result="aborted"
+                detail="cannot read body for task PR #$tn; refusing to evaluate contract declaration on unknown input"
+                exit 1
+              fi
 
               compat="$(printf '%s' "$tbody" | awk 'tolower($0) ~ /^compatibility:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')"
               case "$compat" in
