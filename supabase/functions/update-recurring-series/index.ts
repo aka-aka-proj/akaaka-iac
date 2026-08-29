@@ -96,8 +96,6 @@ Deno.serve(async (req: Request) => {
     }
 
     const serviceClient = createClient(supabaseUrl, serviceRoleKey)
-    const nowIso = new Date().toISOString()
-
     // Fetch target event
     const { data: target, error: targetError } = await serviceClient.from('events')
       .select('id, series_id, start_time, lifecycle_status, creator_id')
@@ -145,7 +143,8 @@ Deno.serve(async (req: Request) => {
     const updatedEventIds: string[] = []
 
     for (const member of scopeMembers) {
-      if (isLocked(member, nowIso)) {
+      const currentNowIso = new Date().toISOString()
+      if (isLocked(member, currentNowIso)) {
         skippedLockedCount += 1
         continue
       }
@@ -185,7 +184,7 @@ Deno.serve(async (req: Request) => {
         .update(updateObject)
         .eq('id', member.id)
         .not('lifecycle_status', 'in', '("completed","archived","cancelled")')
-        .or(`lifecycle_status.eq.draft,start_time.gt.${nowIso}`)
+        .or(`lifecycle_status.eq.draft,start_time.gt.${currentNowIso}`)
 
       if (updateError) {
         failedCount += 1
@@ -199,7 +198,7 @@ Deno.serve(async (req: Request) => {
 // Template sync (only for deadline actions that modify the rule)
     let templateSyncSkipped = false
     if (deadlineAction !== 'keep') {
-      if (isLocked(parent as SeriesMemberRow, nowIso)) {
+      if (isLocked(parent as SeriesMemberRow, new Date().toISOString())) {
         templateSyncSkipped = true
       } else {
         const newRule = computeTemplateRuleUpdate(parent.recurrence_rule, deadlineAction, deadlineParams)

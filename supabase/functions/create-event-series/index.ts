@@ -21,6 +21,11 @@ interface SeriesMemberEvent {
   position: number
 }
 
+interface OwnedEvent {
+  id: string
+  series_member_position: number | null
+}
+
 interface CreateSeriesPayload {
   title: string
   description?: string
@@ -58,12 +63,17 @@ Deno.serve(async (req: Request) => {
       return errorResponse('validation_error', 'At least 2 member events are required', 400)
     }
 
+    const positions = member_events.map((member) => member.position)
+    if (positions.some((position) => !Number.isInteger(position) || position < 1) || new Set(positions).size !== positions.length) {
+      return errorResponse('validation_error', 'member event positions must be unique positive integers', 400)
+    }
+
     const serviceClient = createClient(supabaseUrl, serviceRoleKey)
 
     // Verify caller owns all member events
     const { data: ownedEvents, error: ownedError } = await serviceClient
       .from('events')
-      .select('id')
+      .select('id, series_member_position')
       .in('id', member_events.map((m) => m.event_id))
       .eq('creator_id', user.id)
 
@@ -71,15 +81,17 @@ Deno.serve(async (req: Request) => {
     if (!ownedEvents || ownedEvents.length !== member_events.length) {
       return errorResponse('forbidden', 'You must be the creator of all member events', 403)
     }
+    const previousPositions = new Map((ownedEvents as OwnedEvent[]).map((event) => [event.id, event.series_member_position]))
 
     // Check no event already belongs to another series
     for (const me of member_events) {
-      const { data: existingMembership } = await serviceClient
+      const { data: existingMembership, error: membershipLookupError } = await serviceClient
         .from('event_series_membership')
-        .select('id', { head: true })
+        .select('id')
         .eq('event_id', me.event_id)
         .maybeSingle()
 
+      if (membershipLookupError) return errorResponse('internal_error', 'Failed to verify event series membership', 500)
       if (existingMembership) {
         return errorResponse('conflict_error', `Event ${me.event_id} already belongs to a series`, 409)
       }
@@ -123,10 +135,19 @@ Deno.serve(async (req: Request) => {
 
     // Update events.series_member_position for quick reference
     for (const me of member_events) {
-      await serviceClient
+      const { error: positionError } = await serviceClient
         .from('events')
         .update({ series_member_position: me.position })
         .eq('id', me.event_id)
+      if (positionError) {
+        for (const member of member_events) {
+          await serviceClient.from('events')
+            .update({ series_member_position: previousPositions.get(member.event_id) })
+            .eq('id', member.event_id)
+        }
+        await serviceClient.from('event_series').delete().eq('id', seriesId)
+        return errorResponse('internal_error', 'Failed to synchronize member event positions', 500)
+      }
     }
 
     return jsonResponse({
