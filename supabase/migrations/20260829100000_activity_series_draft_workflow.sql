@@ -20,10 +20,10 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF OLD.lifecycle_status IS DISTINCT FROM NEW.lifecycle_status
+  IF NEW.lifecycle_status = 'published'
     AND COALESCE(current_setting('app.activity_series_publish_rpc', true), '') <> 'on'
   THEN
-    RAISE EXCEPTION 'activity series lifecycle must be changed through publish_event_series';
+    RAISE EXCEPTION 'published activity series must be created or changed through publish_event_series';
   END IF;
   RETURN NEW;
 END;
@@ -31,7 +31,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_prevent_direct_activity_series_publish ON public.event_series;
 CREATE TRIGGER trg_prevent_direct_activity_series_publish
-  BEFORE UPDATE OF lifecycle_status ON public.event_series
+  BEFORE INSERT OR UPDATE OF lifecycle_status ON public.event_series
   FOR EACH ROW
   EXECUTE FUNCTION public.prevent_direct_activity_series_publish();
 
