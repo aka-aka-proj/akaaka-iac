@@ -13,7 +13,7 @@ CREATE POLICY event_series_owner_update
   ON public.event_series
   FOR UPDATE TO authenticated
   USING (creator_id = auth.uid())
-  WITH CHECK (creator_id = auth.uid() AND lifecycle_status IN ('draft', 'published'));
+  WITH CHECK (creator_id = auth.uid() AND lifecycle_status IN ('draft', 'published', 'archived', 'cancelled'));
 
 CREATE OR REPLACE FUNCTION public.prevent_direct_activity_series_publish()
 RETURNS TRIGGER
@@ -59,7 +59,7 @@ CREATE POLICY event_series_membership_update
   USING (
     EXISTS (
       SELECT 1 FROM public.event_series es
-      WHERE es.id = series_id AND es.creator_id = auth.uid()
+      WHERE es.id = series_id AND es.creator_id = auth.uid() AND es.lifecycle_status = 'draft'
     )
   )
   WITH CHECK (
@@ -68,6 +68,7 @@ CREATE POLICY event_series_membership_update
       JOIN public.events e ON e.id = event_id
       WHERE es.id = series_id
         AND es.creator_id = auth.uid()
+        AND es.lifecycle_status = 'draft'
         AND e.creator_id = auth.uid()
         AND e.lifecycle_status = 'draft'
     )
@@ -101,6 +102,12 @@ BEGIN
   IF series_row.lifecycle_status <> 'draft' THEN
     RAISE EXCEPTION 'only draft series can be published';
   END IF;
+
+  PERFORM 1
+  FROM public.event_series_membership
+  WHERE series_id = p_series_id
+  ORDER BY position
+  FOR UPDATE;
 
   SELECT COUNT(*) INTO member_count
   FROM public.event_series_membership
