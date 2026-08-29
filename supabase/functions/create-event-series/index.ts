@@ -73,7 +73,7 @@ Deno.serve(async (req: Request) => {
     // Verify caller owns all member events
     const { data: ownedEvents, error: ownedError } = await serviceClient
       .from('events')
-      .select('id, series_member_position')
+      .select('id, lifecycle_status, series_member_position')
       .in('id', member_events.map((m) => m.event_id))
       .eq('creator_id', user.id)
 
@@ -82,6 +82,9 @@ Deno.serve(async (req: Request) => {
       return errorResponse('forbidden', 'You must be the creator of all member events', 403)
     }
     const previousPositions = new Map((ownedEvents as OwnedEvent[]).map((event) => [event.id, event.series_member_position]))
+    if (ownedEvents.some((event) => event.lifecycle_status !== 'draft')) {
+      return errorResponse('validation_error', 'Only draft events can be added to a new activity series', 400)
+    }
 
     // Check no event already belongs to another series
     for (const me of member_events) {
@@ -105,7 +108,7 @@ Deno.serve(async (req: Request) => {
         title: title.trim(),
         description: description?.trim() ?? null,
         is_whole_series_required: is_whole_series_required ?? false,
-        lifecycle_status: 'published',
+        lifecycle_status: 'draft',
       })
       .select('id')
       .single()
