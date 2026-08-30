@@ -13,7 +13,6 @@ VALUES
   ('00000000-0000-4000-8000-000000000702', 'Target', '[{"platform":"x","url":"https://x.com/target"},{"platform":"instagram","url":"https://instagram.com/target"}]'::jsonb);
 SET session_replication_role = origin;
 
-SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000701', true);
 
 SELECT is(
