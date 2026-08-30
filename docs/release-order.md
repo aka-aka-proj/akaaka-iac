@@ -92,6 +92,15 @@ log、summary 或 response。
 
 ---
 
+## Release notes 與 production record
+
+- `akaaka-iac/CHANGELOG.md` 記錄 Supabase、migration、RLS、RPC、Edge Function、scheduler 與其他 infrastructure component changes。
+- 每次 production release 可建立對應的 GitHub Release，內容聚焦本 repo 的 component changes。
+- 跨 repo 的完整發版紀錄由 `akaaka-docs/docs/releases/` 的 Production Release Record 持有，並連結本 repo 的 release PR、released SHA / version、`Compatibility:`、`Docs:`、frontend consumer evidence、CD 結論與 remediation notes。
+- Production Release Record 不取代 weekly orchestrator 的 runtime manifest/checkpoint；前者供人與長期稽核閱讀，後者供 atomic merge、resume 與 deployment evidence 使用。
+
+---
+
 ## 緊急回滾
 
 1. 找到上一個可用 commit SHA  
