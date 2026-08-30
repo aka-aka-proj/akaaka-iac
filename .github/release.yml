@@ -1,0 +1,27 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Expand changes
+      labels:
+        - expand
+        - migration
+    - title: Edge Functions and runtime
+      labels:
+        - edge-function
+        - runtime
+    - title: Security and RLS
+      labels:
+        - security
+        - rls
+    - title: Fixes
+      labels:
+        - bug
+        - fix
+    - title: Contract changes
+      labels:
+        - contract
+    - title: Other infrastructure changes
+      labels:
+        - "*"
