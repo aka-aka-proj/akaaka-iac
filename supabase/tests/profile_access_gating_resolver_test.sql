@@ -26,10 +26,12 @@ SELECT is(
   'non-mutual viewer cannot receive the X URL'
 );
 
+SET session_replication_role = replica;
 INSERT INTO public.user_follows (follower_id, followed_id)
 VALUES
   ('00000000-0000-4000-8000-000000000701', '00000000-0000-4000-8000-000000000702'),
   ('00000000-0000-4000-8000-000000000702', '00000000-0000-4000-8000-000000000701');
+SET session_replication_role = origin;
 
 SELECT is(
   (SELECT external_social_links -> 0 ->> 'url' FROM public.get_profile_for_viewer('00000000-0000-4000-8000-000000000702')),
@@ -37,8 +39,10 @@ SELECT is(
   'mutually-followed viewer receives the X URL'
 );
 
+SET session_replication_role = replica;
 INSERT INTO public.blocks (blocker_id, blocked_id)
 VALUES ('00000000-0000-4000-8000-000000000702', '00000000-0000-4000-8000-000000000701');
+SET session_replication_role = origin;
 
 SELECT is(
   (SELECT jsonb_path_exists(external_social_links, '$[*] ? (@.platform == "x")') FROM public.get_profile_for_viewer('00000000-0000-4000-8000-000000000702')),
