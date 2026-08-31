@@ -1,7 +1,7 @@
 name: Web Push delivery scheduler
 
 # Scheduled delivery now lives in Supabase pg_cron.
-# Keep this workflow only as an operational/manual fallback.
+# Keep this workflow only as a manual operational fallback.
 on:
   workflow_dispatch:
 
