@@ -145,9 +145,9 @@ jobs:
             if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
               printf '%s' "$out"; return 0
             fi
-            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.merged // false),(.merge_commit_sha // "")] | @tsv' 2>/dev/null)" || return 1
             st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
-            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            if [ "$st_state" = "closed" ] && [ "$(printf '%s' "$st" | cut -f2)" = "true" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
             return 1
           }
 
@@ -330,9 +330,9 @@ jobs:
             if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
               printf '%s' "$out"; return 0
             fi
-            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.merged // false),(.merge_commit_sha // "")] | @tsv' 2>/dev/null)" || return 1
             st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
-            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            if [ "$st_state" = "closed" ] && [ "$(printf '%s' "$st" | cut -f2)" = "true" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
             return 1
           }
 
@@ -362,7 +362,10 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | jq -c --arg k "$1" '.repos[$k] // .[$k] // empty' || true
           }
           state_get_raw() {
-            gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true
+            local encoded
+            encoded="$(gh api "repos/$GITHUB_REPOSITORY/contents/state.json?ref=$RELEASE_STATE_BRANCH" --jq '.content' 2>/dev/null)" || return 1
+            [ -n "$encoded" ] || return 1
+            printf '%s' "$encoded" | base64 -d 2>/dev/null || return 1
           }
           # 解析 release range（main...preview）涉及的 task PR 集合：
           # 每個 commit 先查 API 關聯 PR，再從訊息主題擷取 #N 參照，最後去重
@@ -535,7 +538,11 @@ jobs:
             # 僅在 switch evidence 缺失時中止。證據＝stored release state 中每個已出貨
             # expand 都存在「Consumes-Expand 指向它且部署 READY＋smoke 通過」的 frontend entry
             if [ "${contract_flag:-0}" -eq 1 ]; then
-              state_raw="$(state_get_raw)"
+              if ! state_raw="$(state_get_raw)" || ! printf '%s' "$state_raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+                result="aborted"
+                detail="contract-step blocked: release state checkpoint is unavailable or invalid"
+                exit 1
+              fi
               # 同一 release 不得同時出貨新 expand 與 contract-step：
               # 新 expand 本週才要部署，frontend consumer 不可能在更早取得成功證據；
               # 唯有已存在於 state.expands 的舊 expand 才由下方 evidence 規則把關
@@ -760,9 +767,9 @@ jobs:
             if out="$(gh api -X PUT "repos/$r/pulls/$n/merge" -f merge_method=merge -f sha="$s" --jq '.sha' 2>/dev/null)" && [ -n "$out" ]; then
               printf '%s' "$out"; return 0
             fi
-            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.mergeCommit.oid // "")] | @tsv' 2>/dev/null)" || return 1
+            st="$(gh api "repos/$r/pulls/$n" --jq '[(.state // ""),(.merged // false),(.merge_commit_sha // "")] | @tsv' 2>/dev/null)" || return 1
             st_state="${st%%$'\t'*}"; msha="${st##*$'\t'}"
-            if [ "$st_state" = "MERGED" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
+            if [ "$st_state" = "closed" ] && [ "$(printf '%s' "$st" | cut -f2)" = "true" ] && [ -n "$msha" ]; then printf '%s' "$msha"; return 0; fi
             return 1
           }
 
@@ -1281,6 +1288,7 @@ jobs:
               },
               expands: (
                 (($prev.expands // []) +
+                 (if (($ir == "released" or $ir == "no-changes") and ($idep == "success" or $idep == "no-deploy")) then ($prev.repos.iac.pending_expands // []) else [] end) +
                  (if ($iexp == "" or $iexp == "[]") then [] else ($iexp | fromjson) end))
                 | sort_by(.shipped_at) | group_by(.pr) | map(.[-1])
               ),
