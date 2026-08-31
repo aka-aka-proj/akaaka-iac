@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(29);
+SELECT plan(31);
 
 -- This suite deliberately checks the deployed migration contract only. It does
 -- not insert user content, use production identities, or claim to replace the
@@ -18,6 +18,18 @@ SELECT ok(
 SELECT ok(
   has_table_privilege('authenticated', 'public.profiles', 'UPDATE'),
   'authenticated can reach profiles UPDATE through the Data API'
+);
+
+SELECT ok(
+  has_column_privilege('authenticated', 'public.profiles', 'id', 'SELECT')
+    AND has_column_privilege('authenticated', 'public.profiles', 'role_status', 'SELECT'),
+  'authenticated can read only columns required by profile writes and event-owner policy'
+);
+
+SELECT ok(
+  NOT has_column_privilege('authenticated', 'public.profiles', 'display_name', 'SELECT')
+    AND NOT has_column_privilege('authenticated', 'public.profiles', 'external_social_links', 'SELECT'),
+  'authenticated cannot directly read private profile columns'
 );
 
 SELECT ok(

@@ -3,6 +3,10 @@
 -- Profile privacy is enforced at the table boundary.  The viewer-aware
 -- resolver is the only browser read path for profile data.
 REVOKE SELECT ON TABLE public.profiles FROM authenticated;
+-- PostgREST UPDATE requests still need to read the filtered key, and the
+-- events owner policy needs role_status. Keep only those columns available;
+-- profile-page reads use the viewer-aware resolver instead.
+GRANT SELECT (id, role_status) ON TABLE public.profiles TO authenticated;
 
 CREATE OR REPLACE FUNCTION public.register_event_series_atomic(
   p_series_id UUID,
@@ -18,6 +22,7 @@ DECLARE
   v_series_registration UUID;
   v_event RECORD;
   v_event_count INTEGER := 0;
+  v_event_ids UUID[] := ARRAY[]::UUID[];
   v_occupied BIGINT;
   v_registration_id UUID;
 BEGIN
@@ -38,7 +43,7 @@ BEGIN
     JOIN public.event_series_membership AS esm ON esm.event_id = e.id
     WHERE esm.series_id = p_series_id
     ORDER BY e.id
-    FOR UPDATE OF e
+    FOR UPDATE OF e, esm
   LOOP
     SELECT COUNT(*) INTO v_occupied
     FROM public.event_registrations AS er
@@ -49,6 +54,7 @@ BEGIN
       RAISE EXCEPTION 'event capacity exhausted' USING ERRCODE = 'P0001';
     END IF;
     v_event_count := v_event_count + 1;
+    v_event_ids := array_append(v_event_ids, v_event.id);
   END LOOP;
 
   IF v_event_count = 0 THEN
@@ -62,8 +68,7 @@ BEGIN
   FOR v_event IN
     SELECT e.id, e.registration_form_config
     FROM public.events AS e
-    JOIN public.event_series_membership AS esm ON esm.event_id = e.id
-    WHERE esm.series_id = p_series_id
+    WHERE e.id = ANY(v_event_ids)
     ORDER BY e.id
   LOOP
     INSERT INTO public.event_registrations (event_id, profile_id, status)
