@@ -180,8 +180,9 @@ Deno.serve(async (req: Request) => {
 
       // Re-check lock predicate at write time to handle stale data
       // (member may have started between fetch and update).
-      const { error: updateError } = await serviceClient.from('events')
+      const { data: updatedRows, error: updateError } = await serviceClient.from('events')
         .update(updateObject)
+        .select('id')
         .eq('id', member.id)
         .not('lifecycle_status', 'in', '("completed","archived","cancelled")')
         .or(`lifecycle_status.eq.draft,start_time.gt.${currentNowIso}`)
@@ -189,6 +190,10 @@ Deno.serve(async (req: Request) => {
       if (updateError) {
         failedCount += 1
         console.error('Failed to update series member', { memberId: member.id, error: updateError })
+        continue
+      }
+      if (!updatedRows || updatedRows.length === 0) {
+        skippedLockedCount += 1
         continue
       }
       updatedCount += 1
