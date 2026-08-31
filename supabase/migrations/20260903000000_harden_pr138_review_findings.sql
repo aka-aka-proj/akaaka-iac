@@ -84,6 +84,3 @@ BEGIN
   RETURN QUERY SELECT v_series_registration, v_event_count;
 END;
 $$;
-
-REVOKE ALL ON FUNCTION public.register_event_series_atomic(UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.register_event_series_atomic(UUID, UUID, JSONB) TO service_role;
