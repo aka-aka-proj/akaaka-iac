@@ -37,6 +37,8 @@ BEGIN
     RAISE EXCEPTION 'publish_at must be before unpublish_at';
   END IF;
 
+  -- Drafts cannot be scheduled: reject any non-null publish_at/unpublish_at so
+  -- owners never keep a schedule the minute-by-minute scheduler will ignore.
   IF (p_publish_at IS NOT NULL OR p_unpublish_at IS NOT NULL)
     AND EXISTS (
       SELECT 1
@@ -72,6 +74,9 @@ BEGIN
 END;
 $$;
 
+-- Backfill: clear dead schedules left on drafts by earlier RPC versions.
+-- The publication trigger only allows writes when app.event_publication_rpc
+-- is 'on'; set_config with transaction scope covers this statement.
 SELECT set_config('app.event_publication_rpc', 'on', true);
 
 UPDATE public.events
