@@ -206,72 +206,31 @@ Deno.serve(async (req: Request) => {
       return errorResponse('blocked', message, 403)
     }
 
-    // 7. Create series registration
-    const { data: seriesRegistration, error: regError } = await serviceClient
-      .from('event_series_registrations')
-      .insert({
-        series_id: seriesId,
-        profile_id: user.id,
-        status: 'approved',
-        whole_series_registration: true,
-      })
-      .select('id')
-      .single()
-
-    if (regError || !seriesRegistration) {
-      return errorResponse('internal_error', 'Failed to create series registration', 500)
+    // Recheck capacity and perform every write under one database transaction.
+    const { data: rawAtomicRegistration, error: atomicError } = await serviceClient.rpc(
+      'register_event_series_atomic',
+      { p_series_id: seriesId, p_profile_id: user.id, p_form_responses: body.form_responses ?? {} },
+    ).single()
+    const atomicRegistration = rawAtomicRegistration as unknown as {
+      registration_id: string
+      event_registration_count: number
+    } | null
+    if (atomicError || !atomicRegistration) {
+      console.error('Failed to atomically register for series:', atomicError)
+      const isCapacityRace = atomicError?.message?.includes('capacity')
+      return errorResponse(
+        isCapacityRace ? 'capacity_exhausted' : 'internal_error',
+        isCapacityRace ? 'The series changed while you were registering. Please try again.' : 'Failed to register for every member event',
+        isCapacityRace ? 409 : 500,
+      )
     }
 
-    // 8. Create individual event registrations for each member event
-    const registrationIds: string[] = []
-
-    for (const event of events) {
-      const { data: eventReg, error: eventRegError } = await serviceClient
-        .from('event_registrations')
-        .insert({
-          event_id: event.id,
-          profile_id: user.id,
-          status: 'approved',
-        })
-        .select('id')
-        .single()
-
-      if (eventRegError) {
-        console.error(`Failed to create registration for event ${event.id}:`, eventRegError)
-        await serviceClient.from('event_registrations').delete().in('id', registrationIds)
-        await serviceClient.from('notifications').delete()
-          .eq('recipient_profile_id', series.creator_id)
-          .eq('notification_type', 'event_series_registration')
-          .eq('event_series_id', seriesId)
-          .eq('actor_profile_id', user.id)
-        await serviceClient.from('event_series_registrations').delete().eq('id', seriesRegistration.id)
-        return errorResponse('internal_error', 'Failed to register for every member event', 500)
-      }
-      registrationIds.push(eventReg.id)
-
-      if (body.form_responses && event.registration_form_config) {
-        const { error: responseError } = await serviceClient
-          .from('event_registration_responses')
-          .insert({ registration_id: eventReg.id, responses: body.form_responses })
-        if (responseError) {
-          await serviceClient.from('event_registrations').delete().in('id', registrationIds)
-          await serviceClient.from('notifications').delete()
-            .eq('recipient_profile_id', series.creator_id)
-            .eq('notification_type', 'event_series_registration')
-            .eq('event_series_id', seriesId)
-            .eq('actor_profile_id', user.id)
-          await serviceClient.from('event_series_registrations').delete().eq('id', seriesRegistration.id)
-          return errorResponse('internal_error', 'Failed to save registration responses', 500)
-        }
-      }
-    }
-
-    console.log(`Series registration ${seriesRegistration.id}: ${registrationIds.length}/${events.length} event registrations created`)
+    console.log(`Series registration ${atomicRegistration.registration_id}: ${atomicRegistration.event_registration_count}/${events.length} event registrations created`)
 
     return jsonResponse({
       success: true,
-      registration_id: seriesRegistration.id,
-      event_registration_count: registrationIds.length,
+      registration_id: atomicRegistration.registration_id,
+      event_registration_count: atomicRegistration.event_registration_count,
       total_events: events.length,
     }, 200)
 
