@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(8);
+SELECT plan(10);
 
 SELECT is(
   to_regclass('public.connections')::text,
@@ -60,6 +60,28 @@ SELECT ok(
       AND policyname = 'user_follows_delete_self'
   ),
   'users can remove only their own follow rows'
+);
+
+SELECT ok(
+  pg_get_functiondef('public.notify_followed_profile()'::regprocedure)
+    LIKE '%WHERE notification_type = ''new_follow''%'
+    AND pg_get_functiondef('public.notify_followed_profile()'::regprocedure)
+      LIKE '%actor_profile_id IS NOT NULL%'
+    AND pg_get_functiondef('public.notify_followed_profile()'::regprocedure)
+      LIKE '%ON CONFLICT (recipient_profile_id, notification_type, actor_profile_id)%',
+  'follow notification trigger conflict target matches the new_follow index'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname = 'notifications_follow_target_unique'
+      AND indexdef LIKE '%notification_type = ''new_follow''%'
+      AND indexdef LIKE '%actor_profile_id IS NOT NULL%'
+  ),
+  'follow notification uniqueness is scoped to new_follow'
 );
 
 SELECT ok(
