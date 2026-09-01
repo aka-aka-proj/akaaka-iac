@@ -308,13 +308,21 @@ jobs:
               # 已合併但部署未收斂：記為 pending，resume 成功時入帳——否則 evidence gate 永遠看不到此 expand
               local entries2=() en2
               for en2 in "${expand_nums[@]}"; do
-                entries2+=("$(jq -cn --argjson pr "$en2" '{pr:$pr}')")
+                entries2+=("$(jq -cn --argjson pr "$en2" --arg s "$sha" '{pr:$pr,sha:$s}')")
               done
               pending_out="$(printf '%s\n' "${entries2[@]}" | jq -s -c '.')"
             fi
             if [ -n "$resume_expands" ] && { [ "$deploy" = "success" ] || [ "$deploy" = "no-deploy" ]; } && [ "$expands_out" = "[]" ]; then
-              expands_out="$resume_expands"
-              pending_out="[]"
+              if printf '%s' "$resume_expands" | jq -e --arg sha "$sha" 'type == "array" and all(.[]; (.sha // "") == $sha)' >/dev/null 2>&1; then
+                expands_out="$resume_expands"
+                pending_out="[]"
+              else
+                # Evidence without an exact deployment SHA is not proof that
+                # the expansion shipped; retain it for explicit remediation.
+                expands_out="[]"
+                pending_out="$resume_expands"
+                detail+="pending expansion evidence retained because deployment SHA did not match; "
+              fi
             fi
             printf 'result=%s\npr=%s\nsha=%s\ndeploy=%s\nclass=%s\nrun_id=%s\nexpands=%s\npending_expands=%s\n' \
               "$result" "$pr" "$sha" "$deploy" "$class" "$run_id_out" "$expands_out" "$pending_out" >> "$GITHUB_OUTPUT"
