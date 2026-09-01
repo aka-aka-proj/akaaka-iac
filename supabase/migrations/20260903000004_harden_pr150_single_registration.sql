@@ -40,9 +40,9 @@ BEGIN
     WHERE er.event_id = p_event_id AND er.status = 'waitlisted';
     v_status := 'waitlisted';
   END IF;
-  INSERT INTO public.event_registrations (event_id, profile_id, status, waitlist_position)
+  INSERT INTO public.event_registrations AS er (event_id, profile_id, status, waitlist_position)
   VALUES (p_event_id, p_profile_id, v_status, v_waitlist_position)
-  RETURNING id, event_id, status, waitlist_position, created_at INTO v_registration;
+  RETURNING er.id, er.event_id, er.status, er.waitlist_position, er.created_at INTO v_registration;
   RETURN QUERY SELECT v_registration.id, v_registration.event_id, v_registration.status,
     v_registration.waitlist_position, v_registration.created_at;
 END;

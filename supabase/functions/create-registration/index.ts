@@ -133,13 +133,20 @@ Deno.serve(async (req: Request) => {
     const { data: rawReg, error: regError } = await serviceClient
       .rpc('create_event_registration_atomic', { p_event_id: eventId, p_profile_id: user.id })
       .single()
-    const reg = rawReg as unknown as {
-      id: string
+    const rpcReg = rawReg as unknown as {
+      registration_id: string
       event_id: string
       status: string
       waitlist_position: number | null
       created_at: string
     } | null
+    const reg = rpcReg ? {
+      id: rpcReg.registration_id,
+      event_id: rpcReg.event_id,
+      status: rpcReg.status,
+      waitlist_position: rpcReg.waitlist_position,
+      created_at: rpcReg.created_at,
+    } : null
 
     if (regError || !reg) {
       const message = regError?.message ?? 'Failed to create registration'

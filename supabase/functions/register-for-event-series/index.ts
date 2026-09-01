@@ -223,11 +223,11 @@ Deno.serve(async (req: Request) => {
     } | null
     if (atomicError || !atomicRegistration) {
       console.error('Failed to atomically register for series:', atomicError)
-      const isCapacityRace = atomicError?.message?.includes('capacity')
+      const isRetryableRace = atomicError?.message?.includes('capacity') || atomicError?.message?.includes('membership changed')
       return errorResponse(
-        isCapacityRace ? 'capacity_exhausted' : 'internal_error',
-        isCapacityRace ? 'The series changed while you were registering. Please try again.' : 'Failed to register for every member event',
-        isCapacityRace ? 409 : 500,
+        isRetryableRace ? 'registration_conflict' : 'internal_error',
+        isRetryableRace ? 'The series changed while you were registering. Please try again.' : 'Failed to register for every member event',
+        isRetryableRace ? 409 : 500,
       )
     }
 
