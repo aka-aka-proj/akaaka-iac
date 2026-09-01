@@ -110,6 +110,7 @@ Deno.serve(async (req: Request) => {
       event: unknown[]
     }>
     const events: SeriesEventRow[] = []
+    const expectedEventIds = members.map((member) => member.event_id)
     for (const member of members) {
       const nested = Array.isArray(member.event) ? member.event[0] : member.event
       if (nested && typeof nested === 'object') {
@@ -209,7 +210,12 @@ Deno.serve(async (req: Request) => {
     // Recheck capacity and perform every write under one database transaction.
     const { data: rawAtomicRegistration, error: atomicError } = await serviceClient.rpc(
       'register_event_series_atomic',
-      { p_series_id: seriesId, p_profile_id: user.id, p_form_responses: body.form_responses ?? {} },
+      {
+        p_series_id: seriesId,
+        p_profile_id: user.id,
+        p_form_responses: body.form_responses ?? {},
+        p_expected_event_ids: expectedEventIds,
+      },
     ).single()
     const atomicRegistration = rawAtomicRegistration as unknown as {
       registration_id: string
