@@ -1296,7 +1296,6 @@ jobs:
               },
               expands: (
                 (($prev.expands // []) +
-                 (if (($ir == "released" or $ir == "no-changes") and ($idep == "success" or $idep == "no-deploy")) then ($prev.repos.iac.pending_expands // []) else [] end) +
                  (if ($iexp == "" or $iexp == "[]") then [] else ($iexp | fromjson) end))
                 | sort_by(.shipped_at) | group_by(.pr) | map(.[-1])
               ),
@@ -1315,7 +1314,7 @@ jobs:
             # pending evidence：合併後部署未收斂時暫存；resume 成功的 run 由 stage 直接
             # 輸出為正式 ledger entry，此處同步清空；未收斂則以本 run 最新狀態覆寫
             | .repos.iac.pending_expands = (
-                if ($ir == "released" and ($idep == "success" or $idep == "no-deploy")) then []
+                if ($ir == "released" and ($idep == "success" or $idep == "no-deploy") and ($ipend == "" or $ipend == "[]")) then []
                 elif ($ir == "released" and $ipend != "" and $ipend != "[]") then ($ipend | fromjson)
                 elif (($prev.repos.iac.pending_expands // []) != []) then ($prev.repos.iac.pending_expands)
                 else ($ipend | if . == "" or . == "[]" then [] else fromjson end) end)
