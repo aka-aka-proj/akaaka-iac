@@ -128,47 +128,25 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 6. Determine status: pending or waitlisted
-    let status = 'pending'
-    let waitlistPosition: number | null = null
-
-    if (event.max_capacity) {
-      const { count: approvedCount } = await serviceClient
-        .from('event_registrations')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_id', eventId)
-        .in('status', ['approved', 'pending'])
-
-      if ((approvedCount ?? 0) >= event.max_capacity) {
-        // Get next waitlist position
-        const { data: maxWaitlist } = await serviceClient
-          .from('event_registrations')
-          .select('waitlist_position')
-          .eq('event_id', eventId)
-          .eq('status', 'waitlisted')
-          .order('waitlist_position', { ascending: false })
-          .limit(1)
-          .maybeSingle()
-
-        waitlistPosition = (maxWaitlist?.waitlist_position ?? 0) + 1
-        status = 'waitlisted'
-      }
-    }
-
-    // 7. Insert registration
-    const { data: reg, error: regError } = await serviceClient
-      .from('event_registrations')
-      .insert([{
-        event_id: eventId,
-        profile_id: user.id,
-        status,
-        waitlist_position: waitlistPosition,
-      }])
-      .select('id, event_id, status, waitlist_position, created_at')
+    // 6. Recheck capacity and insert under the same event-row lock used by
+    // series registration. The earlier capacity read is UX-only.
+    const { data: rawReg, error: regError } = await serviceClient
+      .rpc('create_event_registration_atomic', { p_event_id: eventId, p_profile_id: user.id })
       .single()
+    const reg = rawReg as unknown as {
+      id: string
+      event_id: string
+      status: string
+      waitlist_position: number | null
+      created_at: string
+    } | null
 
-    if (regError) {
-      return jsonResponse({ error: 'db_error', message: regError.message }, 500)
+    if (regError || !reg) {
+      const message = regError?.message ?? 'Failed to create registration'
+      if (message.includes('already registered')) {
+        return jsonResponse({ error: 'already_registered', message: 'You already have an active registration for this event' }, 400)
+      }
+      return jsonResponse({ error: 'db_error', message }, 500)
     }
 
     // 8. Insert form responses if provided
