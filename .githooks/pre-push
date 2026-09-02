@@ -1,0 +1,78 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+classifier="$repo_root/scripts/ci/classify-changes.sh"
+changed_file=$(mktemp)
+supabase_started=0
+
+cleanup() {
+  rm -f "$changed_file"
+  if [ "$supabase_started" -eq 1 ]; then
+    SUPABASE_TELEMETRY_DISABLED=true supabase stop --no-backup || true
+  fi
+}
+trap cleanup EXIT
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  [ "$local_sha" != "0000000000000000000000000000000000000000" ] || continue
+
+  if git rev-parse --verify origin/preview >/dev/null 2>&1; then
+    git diff --name-only "origin/preview...${local_sha}" >> "$changed_file"
+  elif [ "$remote_sha" != "0000000000000000000000000000000000000000" ]; then
+    git diff --name-only "$remote_sha" "$local_sha" >> "$changed_file"
+  else
+    git show --format= --name-only "$local_sha" >> "$changed_file"
+  fi
+done
+
+sort -u -o "$changed_file" "$changed_file"
+selection=$("$classifier" < "$changed_file")
+migrations=$(printf '%s\n' "$selection" | sed -n 's/^migrations=//p')
+functions=$(printf '%s\n' "$selection" | sed -n 's/^functions=//p')
+cloudflare=$(printf '%s\n' "$selection" | sed -n 's/^cloudflare=//p')
+
+printf 'Running IaC pre-push contracts (migrations=%s functions=%s cloudflare=%s)\n' \
+  "$migrations" "$functions" "$cloudflare"
+
+sh "$repo_root/scripts/ci/test-classify-changes.sh"
+sh "$repo_root/scripts/ci/test-workflow-contract.sh"
+
+if [ "$migrations" = "true" ]; then
+  while IFS= read -r migration; do
+    base=$(basename "$migration")
+    if ! printf '%s\n' "$base" | grep -Eq '^[0-9]{14}_.+\.sql$'; then
+      printf 'Invalid migration filename: %s\n' "$base" >&2
+      exit 1
+    fi
+  done < <(find "$repo_root/supabase/migrations" -maxdepth 1 -type f -name '*.sql')
+
+  if SUPABASE_TELEMETRY_DISABLED=true supabase status >/dev/null 2>&1; then
+    printf 'A local Supabase stack for project_id akaaka-iac is already running. Stop it before push so pgTAP starts from this worktree migrations.\n' >&2
+    exit 1
+  fi
+
+  SUPABASE_TELEMETRY_DISABLED=true supabase db start
+  supabase_started=1
+  while IFS= read -r -d '' test_file; do
+    printf 'Running %s\n' "$test_file"
+    SUPABASE_TELEMETRY_DISABLED=true supabase test db --local "$test_file"
+  done < <(find "$repo_root/supabase/tests" -type f -name '*.sql' -print0 | sort -z)
+fi
+
+if [ "$functions" = "true" ]; then
+  deno lint --config "$repo_root/supabase/functions/deno.json" "$repo_root/supabase/functions/"
+  deno check --config "$repo_root/supabase/functions/deno.json" "$repo_root"/supabase/functions/*/index.ts
+  deno test --allow-all --check --config "$repo_root/supabase/functions/deno.json" "$repo_root/supabase/functions/_shared/"
+fi
+
+if [ "$cloudflare" = "true" ]; then
+  (
+    cd "$repo_root/cloudflare/deletion-ledger-worker"
+    npx --yes wrangler@4.123.0 deploy --dry-run
+  )
+fi
+
+printf 'IaC pre-push validation passed.\n'
