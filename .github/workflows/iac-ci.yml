@@ -5,18 +5,27 @@ on:
     branches:
       - main
       - preview
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: iac-ci-${{ github.workflow }}-${{ github.ref }}
+  group: iac-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'edited' && 'metadata' || 'heavy' }}
   cancel-in-progress: true
 
 jobs:
-  supabase-checks:
+  migration-checks:
     name: Verify ${{ matrix.target.name }}
+    needs: contract-gate
+    if: >-
+      ${{
+        always() &&
+        needs.contract-gate.result == 'success' &&
+        github.event.action != 'edited' &&
+        (github.event_name == 'workflow_dispatch' || needs.contract-gate.outputs.migrations == 'true')
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -25,8 +34,6 @@ jobs:
         target:
           - name: migrations
             path: supabase/migrations
-          - name: functions
-            path: supabase/functions
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -164,8 +171,25 @@ jobs:
             fi
           done
 
+  function-checks:
+    name: Verify functions
+    needs: contract-gate
+    if: >-
+      ${{
+        always() &&
+        needs.contract-gate.result == 'success' &&
+        github.event.action != 'edited' &&
+        (github.event_name == 'workflow_dispatch' || needs.contract-gate.outputs.functions == 'true')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Ensure functions path exists
+        run: test -d supabase/functions
+
       - name: Check independent deletion ledger bootstrap boundary
-        if: matrix.target.name == 'functions'
         run: |
           ledger="supabase/ledger/001_deletion_ledger_bootstrap.sql"
           for required in \
@@ -188,7 +212,6 @@ jobs:
           done
 
       - name: Check functions entrypoints
-        if: matrix.target.name == 'functions'
         run: |
           missing=0
           while IFS= read -r dir; do
@@ -207,25 +230,20 @@ jobs:
           fi
 
       - name: Set up Deno
-        if: matrix.target.name == 'functions'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
 
       - name: Deno lint functions
-        if: matrix.target.name == 'functions'
         run: deno lint --config supabase/functions/deno.json supabase/functions/
 
       - name: Type-check function entrypoints
-        if: matrix.target.name == 'functions'
         run: deno check --config supabase/functions/deno.json supabase/functions/*/index.ts
 
       - name: Run Deno unit tests
-        if: matrix.target.name == 'functions'
-        run: deno test --allow-all --check supabase/functions/_shared/
+        run: deno test --allow-all --check --config supabase/functions/deno.json supabase/functions/_shared/
 
       - name: Check external registration boundary
-        if: matrix.target.name == 'functions'
         run: |
           registration="supabase/functions/create-registration/index.ts"
           for required in \
@@ -239,7 +257,6 @@ jobs:
           done
 
       - name: Check stage deletion ledger control boundary
-        if: matrix.target.name == 'functions'
         run: |
           control="supabase/functions/deletion-ledger-control/index.ts"
           for required in \
@@ -278,7 +295,10 @@ jobs:
     name: Compatibility & docs-first declaration gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'pull_request'
+    outputs:
+      migrations: ${{ steps.changes.outputs.migrations }}
+      functions: ${{ steps.changes.outputs.functions }}
+      cloudflare: ${{ steps.changes.outputs.cloudflare }}
     permissions:
       contents: read
       pull-requests: read
@@ -293,7 +313,26 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Classify changed paths
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            printf 'migrations=true\nfunctions=true\ncloudflare=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate > "$RUNNER_TEMP/pr_files_pages.json" 2>/dev/null; then
+            echo "::error::cannot fetch PR files; refusing to route checks on unknown diff"
+            exit 1
+          fi
+          jq -s 'flatten' "$RUNNER_TEMP/pr_files_pages.json" > "$RUNNER_TEMP/pr_files.json"
+          jq -r '.[].filename' "$RUNNER_TEMP/pr_files.json" | scripts/ci/classify-changes.sh >> "$GITHUB_OUTPUT"
+
       - name: Cross-validate Compatibility and Docs declarations
+        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
@@ -302,18 +341,12 @@ jobs:
           # 時不得視為「沒有契約變更」而放行
           body="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""')" \
             || { echo "::error::cannot read PR body; refusing to evaluate contract gate on unknown input"; exit 1; }
-          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate > /tmp/pr_files.json 2>/dev/null; then
-            echo "::error::cannot fetch PR files; refusing to evaluate contract gate on unknown diff"
-            exit 1
-          fi
-          jq -s 'flatten' /tmp/pr_files.json > /tmp/pr_files_flat.json
-
           touches=0
           while IFS= read -r f; do
             case "$f" in
               supabase/migrations/* | supabase/functions/*) touches=1; break ;;
             esac
-          done < <(jq -r '.[].filename' /tmp/pr_files_flat.json)
+          done < <(jq -r '.[].filename' "$RUNNER_TEMP/pr_files.json")
 
           compat="$(printf '%s' "$body" | awk 'tolower($0) ~ /^compatibility:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')"
           docs_decl="$(printf '%s' "$body" | awk 'tolower($0) ~ /^docs:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}')"
@@ -340,7 +373,7 @@ jobs:
           mig_pat='(DROP[[:space:]]+(TABLE|COLUMN|CONSTRAINT|POLICY|FUNCTION|SCHEMA)|ALTER[[:space:]]+TABLE[^;]*DROP[[:space:]]+(COLUMN|CONSTRAINT)|REVOKE[[:space:]]|SET[[:space:]]+NOT[[:space:]]+NULL)'
           while IFS= read -r entry; do
             fname="${entry%%$'\t'*}"
-            patch="$(jq -r --arg f "$fname" '[.[] | select(.filename == $f)][0].patch // ""' /tmp/pr_files_flat.json)"
+            patch="$(jq -r --arg f "$fname" '[.[] | select(.filename == $f)][0].patch // ""' "$RUNNER_TEMP/pr_files.json")"
             case "$fname" in
               supabase/migrations/*)
                 # 三類新增行屬例行防護而非相容性破壞，偵測前先剝除：
@@ -376,7 +409,7 @@ jobs:
                 ;;
             esac
             [ -z "$detected" ] || break
-          done < <(jq -r '.[] | [.filename] | @tsv' /tmp/pr_files_flat.json)
+          done < <(jq -r '.[] | [.filename] | @tsv' "$RUNNER_TEMP/pr_files.json")
 
           if [ -n "$detected" ] && [ "$compat" != "contract-step" ]; then
             fail "Declaration mismatch: diff shows breaking change ($detected) but declared '$compat'. Declare 'Compatibility: contract-step' or fix the change."
@@ -406,6 +439,14 @@ jobs:
 
   cloudflare-ledger-checks:
     name: Verify Cloudflare deletion ledger provider
+    needs: contract-gate
+    if: >-
+      ${{
+        always() &&
+        needs.contract-gate.result == 'success' &&
+        github.event.action != 'edited' &&
+        (github.event_name == 'workflow_dispatch' || needs.contract-gate.outputs.cloudflare == 'true')
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
