@@ -53,5 +53,6 @@ assert_case ci-test "$all" 'scripts/ci/test-classify-changes.sh'
 assert_case ci-workflow "$all" '.github/workflows/iac-ci.yml'
 assert_case hook "$all" '.githooks/pre-push'
 assert_case unknown-supabase "$all" 'supabase/new-runtime/file.txt'
+assert_case unknown-runtime-root "$all" 'new-provider/runtime/config.json'
 
 printf 'changed-path classifier contract passed\n'
