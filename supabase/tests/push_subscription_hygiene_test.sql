@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(52);
+SELECT plan(53);
 
 -- Structural contracts -------------------------------------------------------
 
@@ -88,14 +88,15 @@ SELECT ok(
 
 SELECT ok(
   NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'INSERT')
-    AND has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE')
-    AND has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
-  'contract-step closes direct INSERT; UPDATE/DELETE stay until their RPC replacements land'
+    AND NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE')
+    AND NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
+  'contract-step closes direct INSERT, UPDATE, and DELETE'
 );
 
 SELECT ok(
-  has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
-  'browser clients keep RLS-scoped self-service unsubscribe'
+  NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE')
+    AND NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
+  'browser clients must use controlled RPCs for subscription mutation'
 );
 
 SELECT ok(
@@ -258,16 +259,16 @@ SELECT throws_ok(
   'contract-step revokes direct client INSERT; subscribe via RPC only'
 );
 
-SELECT lives_ok(
+SELECT throws_ok(
   format(
     'UPDATE public.push_subscriptions SET user_agent = %L WHERE id = %L',
     'ua-legacy',
     :'hyg_original_id'
   ),
-  'direct client UPDATE stays open until the p_mode refresh RPC lands (frontend#92)'
+  '42501',
+  NULL,
+  'contract-step revokes direct client UPDATE; refresh via RPC only'
 );
-
-DELETE FROM public.push_subscriptions WHERE endpoint = 'https://push.local/e-direct';
 
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000303', true);
 SELECT lives_ok(
@@ -277,9 +278,18 @@ SELECT lives_ok(
   'third profile subscribes a disposable endpoint'
 );
 
-SELECT lives_ok(
+SELECT throws_ok(
   $$DELETE FROM public.push_subscriptions WHERE endpoint = 'https://push.local/e9'$$,
-  'clients keep RLS-scoped self-service unsubscribe'
+  '42501',
+  NULL,
+  'contract-step revokes direct client DELETE; unsubscribe via RPC only'
+);
+
+SELECT lives_ok(
+  $$SELECT public.unsubscribe_push_subscription(
+    'https://push.local/e9', 'p256dh-c', 'auth-c'
+  )$$,
+  'self-service unsubscribe uses the controlled RPC'
 );
 
 SELECT is(

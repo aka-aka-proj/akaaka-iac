@@ -118,9 +118,9 @@ SELECT ok(
 );
 
 SELECT ok(
-  has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE')
-    AND has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
-  'UPDATE/DELETE stay open until p_mode refresh RPC and unsubscribe RPC land'
+  NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'UPDATE')
+    AND NOT has_table_privilege('authenticated', 'public.push_subscriptions', 'DELETE'),
+  'contract-step revokes direct UPDATE/DELETE after controlled RPCs land'
 );
 
 SELECT ok(
