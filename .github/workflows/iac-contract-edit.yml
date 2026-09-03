@@ -1,0 +1,37 @@
+name: Supabase IaC metadata gate
+
+on:
+  pull_request:
+    branches:
+      - main
+      - preview
+    types: [edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iac-contract-edit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  contract-gate:
+    name: Compatibility & docs-first declaration gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.AKA_REPO_TOKEN || github.token }}
+      CROSS_REPO_TOKEN: ${{ secrets.AKA_REPO_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      DOCS_REPO: aka-aka-proj/akaaka-docs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Fetch complete PR contract inputs
+        run: scripts/ci/fetch-pr-contract-inputs.sh
+
+      - name: Cross-validate Compatibility and Docs declarations
+        run: scripts/ci/validate-pr-contract.sh
