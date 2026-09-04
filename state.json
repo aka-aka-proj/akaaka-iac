@@ -1,0 +1,40 @@
+{
+  "version": 2,
+  "generated_at": "2026-09-04T04:41:59Z",
+  "repos": {
+    "iac": {
+      "result": "failed",
+      "pr": "https://github.com/aka-aka-proj/akaaka-iac/pull/162",
+      "sha": "",
+      "deploy": "unknown",
+      "smoke": "",
+      "class": "",
+      "run_id": "",
+      "detail": "",
+      "pending_expands": []
+    },
+    "frontend": {
+      "result": "",
+      "pr": null,
+      "sha": "",
+      "deploy": "",
+      "smoke": "",
+      "class": "",
+      "vercel_uid": "",
+      "detail": "",
+      "pending_consumptions": []
+    },
+    "docs": {
+      "result": "no-changes",
+      "pr": null,
+      "sha": "",
+      "deploy": "not-applicable",
+      "smoke": "",
+      "class": "",
+      "detail": ""
+    }
+  },
+  "expands": [],
+  "consumptions": [],
+  "last_full_release_at": ""
+}
