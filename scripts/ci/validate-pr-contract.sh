@@ -14,16 +14,18 @@ test -s "$pr_json" || fail "PR metadata is unavailable; refusing to validate unk
 
 body=$(jq -r '.body // ""' "$pr_json")
 touches=0
+requires_docs=0
 while IFS= read -r file; do
   case "$file" in
-    supabase/migrations/* | supabase/functions/*) touches=1; break ;;
+    supabase/migrations/* | supabase/functions/*) touches=1 ;;
+    .github/workflows/* | scripts/ci/* | .githooks/*) requires_docs=1 ;;
   esac
 done < <(jq -r '.[] | .filename, (.previous_filename // empty)' "$files_json")
 
 compat=$(printf '%s' "$body" | awk 'tolower($0) ~ /^compatibility:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')
 docs_decl=$(printf '%s' "$body" | awk 'tolower($0) ~ /^docs:/ {gsub(/\r/,""); sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit}')
 
-if [ "$touches" -eq 0 ]; then
+if [ "$touches" -eq 0 ] && [ "$requires_docs" -eq 0 ]; then
   if [ -n "$compat" ] && ! printf '%s' "$compat" | grep -Eq '^(backward-compatible|expand-only|contract-step)$'; then
     fail "Compatibility value '$compat' is not one of backward-compatible | expand-only | contract-step"
   fi
@@ -41,27 +43,31 @@ detected=""
 migration_pattern='(DROP[[:space:]]+(TABLE|COLUMN|CONSTRAINT|POLICY|FUNCTION|SCHEMA)|ALTER[[:space:]]+TABLE[^;]*DROP[[:space:]]+(COLUMN|CONSTRAINT)|REVOKE[[:space:]]|SET[[:space:]]+NOT[[:space:]]+NULL)'
 while IFS= read -r entry; do
   filename="${entry%%$'\t'*}"
+  patch_state=$(jq -r --arg file "$filename" '[.[] | select(.filename == $file)][0] | if has("patch") and .patch != null then "present" else "missing" end' "$files_json")
   patch=$(jq -r --arg file "$filename" '[.[] | select(.filename == $file)][0].patch // ""' "$files_json")
   case "$filename" in
     supabase/migrations/*)
+      if [ "$patch_state" != "present" ]; then
+        fail "Changed migration $filename has no PR patch; refusing to infer compatibility from an incomplete diff"
+      fi
       plus_lines=$(printf '%s' "$patch" | grep '^+' || true)
       contract_lines=$(printf '%s\n' "$plus_lines" \
         | grep -Ev 'REVOKE[^;]*ON[[:space:]]+FUNCTION' \
-        | grep -Ev 'DROP[[:space:]]+(TABLE|COLUMN|CONSTRAINT|POLICY|FUNCTION|SCHEMA)[[:space:]]+IF[[:space:]]+EXISTS' \
         || true)
-      created_objects=$(printf '%s\n' "$plus_lines" \
-        | sed -nE 's/^\+[[:space:]]*CREATE[[:space:]]+TABLE[[:space:]]+(IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+)?([A-Za-z_][A-Za-z0-9_.]*).*/\2/p' \
-        | awk -F. '{print $NF}' | sort -u | tr '\n' '|' | sed 's/|$//')
-      if [ -n "$created_objects" ]; then
-        contract_lines=$(printf '%s\n' "$contract_lines" \
-          | grep -Eiv "REVOKE[^;]*ON[[:space:]]+(TABLE[[:space:]]+)?[A-Za-z0-9_.]*($created_objects)([[:space:];]|$)" \
-          || true)
-      fi
       hits=$(printf '%s\n' "$contract_lines" | grep -Ei "$migration_pattern" || true)
       if [ -n "$hits" ]; then detected="migrations:$filename"; fi
       ;;
     supabase/functions/*)
+      if [ "$patch_state" != "present" ]; then
+        fail "Changed function file $filename has no PR patch; refusing to infer compatibility from an incomplete diff"
+      fi
+      status=$(jq -r --arg file "$filename" '[.[] | select(.filename == $file)][0].status // ""' "$files_json")
+      previous_filename=$(jq -r --arg file "$filename" '[.[] | select(.filename == $file)][0].previous_filename // ""' "$files_json")
       deleted_exports=$(printf '%s' "$patch" | grep '^-.*export ' || true)
+      case "$status:$filename:$previous_filename" in
+        removed:supabase/functions/*/index.ts:*|removed:supabase/functions/*/index.js:*|*:supabase/functions/*/index.ts:supabase/functions/*/index.ts|*:supabase/functions/*/index.js:supabase/functions/*/index.js)
+          detected="functions-entrypoint-removed:$filename" ;;
+      esac
       if [ -n "$deleted_exports" ]; then detected="functions-export-removed:$filename"; fi
       ;;
   esac
@@ -72,8 +78,10 @@ if [ -n "$detected" ] && [ "$compat" != "contract-step" ]; then
   fail "Declaration mismatch: diff shows breaking change ($detected) but declared '$compat'. Declare 'Compatibility: contract-step' or fix the change."
 fi
 
-if [ -z "$docs_decl" ]; then
+if [ "$requires_docs" -eq 1 ] || [ "$touches" -eq 1 ]; then
+  if [ -z "$docs_decl" ]; then
   fail "PR body is missing the required 'Docs:' declaration ('Docs: none' or akaaka-docs PR numbers). Contract: docs-first binding in 001-vercel-deployment-spec.md."
+  fi
 fi
 
 if [ "$(printf '%s' "$docs_decl" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "none" ]; then

@@ -23,6 +23,8 @@ require_literal "$workflow" 'migrations: ${{ steps.changes.outputs.migrations }}
 require_literal "$workflow" 'functions: ${{ steps.changes.outputs.functions }}'
 require_literal "$workflow" 'cloudflare: ${{ steps.changes.outputs.cloudflare }}'
 require_literal "$workflow" "needs: contract-gate"
+require_literal "$workflow" 'scripts/ci/test-workflow-contract.sh'
+require_literal "$workflow" 'scripts/ci/test-validate-pr-contract.sh'
 require_literal "$metadata_workflow" 'types: [edited]'
 require_literal "$metadata_workflow" 'name: Compatibility & docs-first declaration gate'
 require_literal "$fetch_contract" '.previous_filename // empty'
