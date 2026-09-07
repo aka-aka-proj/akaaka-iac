@@ -51,8 +51,8 @@ SELECT ok(
 
 SELECT ok(
   pg_get_functiondef('public.create_event_registration_atomic(uuid,uuid)'::regprocedure)
-    LIKE '%RETURNING er.id, er.event_id, er.status%',
-  'single-event RPC qualifies RETURNING columns against its table alias'
+    LIKE '%RETURNING er.id, er.event_id, er.status, er.waitlist_position, er.created_at%',
+  'single-event RPC qualifies every RETURNING column against its table alias'
 );
 
 SELECT * FROM finish();
