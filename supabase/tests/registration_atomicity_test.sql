@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(7);
+SELECT plan(8);
 
 SELECT ok(
   to_regprocedure('public.create_event_registration_atomic(uuid,uuid)') IS NOT NULL,
@@ -47,6 +47,12 @@ SELECT ok(
   pg_get_functiondef('public.create_event_registration_atomic(uuid,uuid)'::regprocedure)
     LIKE '%status IN (''approved'', ''pending'')%',
   'single-event capacity count preserves approved and pending semantics'
+);
+
+SELECT ok(
+  pg_get_functiondef('public.create_event_registration_atomic(uuid,uuid)'::regprocedure)
+    LIKE '%RETURNING er.id, er.event_id, er.status%',
+  'single-event RPC qualifies RETURNING columns against its table alias'
 );
 
 SELECT * FROM finish();
