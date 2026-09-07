@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(9);
+SELECT plan(13);
 
 SELECT ok(
   EXISTS (
@@ -44,7 +44,7 @@ SELECT ok(
       AND tgname = 'trg_notify_series_registration'
       AND NOT tgisinternal
   ),
-  'approved series registrations have a notification trigger'
+  'series registrations have an approval notification trigger'
 );
 
 SET session_replication_role = replica;
@@ -62,7 +62,10 @@ VALUES
 INSERT INTO public.event_series (id, creator_id, title, lifecycle_status)
 VALUES
   ('00000000-0000-4000-8000-000000000411', '00000000-0000-4000-8000-000000000401', 'First Series', 'published'),
-  ('00000000-0000-4000-8000-000000000412', '00000000-0000-4000-8000-000000000401', 'Second Series', 'published');
+  ('00000000-0000-4000-8000-000000000412', '00000000-0000-4000-8000-000000000401', 'Second Series', 'published'),
+  ('00000000-0000-4000-8000-000000000413', '00000000-0000-4000-8000-000000000401', 'Third Series', 'published'),
+  ('00000000-0000-4000-8000-000000000414', '00000000-0000-4000-8000-000000000402', 'Member Series', 'published'),
+  ('00000000-0000-4000-8000-000000000415', '00000000-0000-4000-8000-000000000401', 'Fourth Series', 'published');
 
 SET session_replication_role = origin;
 
@@ -94,13 +97,62 @@ SELECT is(
 );
 
 INSERT INTO public.event_series_registrations (series_id, profile_id, status, whole_series_registration)
-VALUES ('00000000-0000-4000-8000-000000000411', '00000000-0000-4000-8000-000000000402', 'pending', false);
+VALUES ('00000000-0000-4000-8000-000000000413', '00000000-0000-4000-8000-000000000402', 'pending', false);
 
 SELECT is(
   (SELECT count(*)::integer FROM public.notifications
    WHERE notification_type = 'event_series_registration'),
   2,
   'pending registration does not create an approval notification'
+);
+
+UPDATE public.event_series_registrations
+SET status = 'approved'
+WHERE series_id = '00000000-0000-4000-8000-000000000413'::uuid
+  AND profile_id = '00000000-0000-4000-8000-000000000402'::uuid;
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.notifications
+   WHERE notification_type = 'event_series_registration'),
+  3,
+  'pending to approved transition creates one notification'
+);
+
+UPDATE public.event_series_registrations
+SET status = 'approved'
+WHERE series_id = '00000000-0000-4000-8000-000000000413'::uuid
+  AND profile_id = '00000000-0000-4000-8000-000000000402'::uuid;
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.notifications
+   WHERE notification_type = 'event_series_registration'),
+  3,
+  'repeated approved update does not duplicate a notification'
+);
+
+INSERT INTO public.event_series_registrations (series_id, profile_id, status, whole_series_registration)
+VALUES ('00000000-0000-4000-8000-000000000415', '00000000-0000-4000-8000-000000000402', 'pending', false);
+
+UPDATE public.event_series_registrations
+SET status = 'approved'
+WHERE series_id = '00000000-0000-4000-8000-000000000415'::uuid
+  AND profile_id = '00000000-0000-4000-8000-000000000402'::uuid;
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.notifications
+   WHERE notification_type = 'event_series_registration'),
+  4,
+  'a second approval transition creates its own notification'
+);
+
+INSERT INTO public.event_series_registrations (series_id, profile_id, status, whole_series_registration)
+VALUES ('00000000-0000-4000-8000-000000000414', '00000000-0000-4000-8000-000000000402', 'approved', true);
+
+SELECT is(
+  (SELECT count(*)::integer FROM public.notifications
+   WHERE notification_type = 'event_series_registration'),
+  4,
+  'series creator self-registration does not create a notification'
 );
 
 SELECT * FROM finish();
