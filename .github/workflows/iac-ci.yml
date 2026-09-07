@@ -311,6 +311,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Check workflow contract
+        run: scripts/ci/test-workflow-contract.sh
+
+      - name: Check contract validator regression
+        run: scripts/ci/test-validate-pr-contract.sh
+
       - name: Classify changed paths
         id: changes
         env:
