@@ -9,9 +9,8 @@ on:
         default: 'list'
         type: choice
         options:
-          - create
           - list
-          - cleanup
+          - verify-series-notification
 
 concurrency:
   group: auth-test-agent-staging
@@ -25,9 +24,9 @@ permissions:
 
 jobs:
   auth-test:
-    name: ${{ github.event.inputs.command == 'create' && 'Create test user' || github.event.inputs.command == 'cleanup' && 'Cleanup test users' || 'List test users' }}
+    name: Verify staging fixtures
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/preview' || github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/preview'
     environment: staging
     env:
       SERVICE_ROLE_KEY: ${{ secrets.STAGING_SERVICE_ROLE_KEY }}
@@ -47,13 +46,8 @@ jobs:
 
       - name: Run agent command
         run: |
+          echo "Source SHA: $GITHUB_SHA"
+          deno check --config supabase/functions/deno.json supabase/functions/testing/authenticated-test-agent.ts
           deno run --allow-env --allow-net --config supabase/functions/deno.json \
             supabase/functions/testing/authenticated-test-agent.ts \
             "${{ github.event.inputs.command }}"
-
-      - name: Cleanup on failure (safety net)
-        if: failure() && github.event.inputs.command == 'create'
-        run: |
-          deno run --allow-env --allow-net --config supabase/functions/deno.json \
-            supabase/functions/testing/authenticated-test-agent.ts cleanup || true
-          echo "Safety cleanup completed (no-op if no accounts existed)"
