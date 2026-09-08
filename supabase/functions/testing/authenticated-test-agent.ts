@@ -1,97 +1,158 @@
-#!/usr/bin/env -S deno run --allow-env --allow-net
+import { createClient } from '@supabase/supabase-js'
+import { FixtureFailure, runFixture, STAGING_URL, type FixtureAdapter, type FixturePlan } from '../_shared/authenticated-fixture.ts'
 
-import { createClient } from "@supabase/supabase-js";
+const options = { auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false } }
 
-const TEST_EMAIL_PREFIX = "iac.patrol.test.";
-const DEFAULT_PASSWORD = "test-password-123!";
-
-interface TestUserResult { email: string; access_token: string; expires_at: number; }
-
-function getEnvOrThrow(name: string): string {
-  const v = Deno.env.get(name);
-  if (!v) throw new Error(`Missing: ${name}`);
-  return v;
-}
-function testEmail(e: string): boolean { return e.startsWith(TEST_EMAIL_PREFIX); }
-function genEmail(): string {
-  return `${TEST_EMAIL_PREFIX}${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}@gmail.com`;
-}
-function adminClient() {
-  return createClient(getEnvOrThrow("SUPABASE_URL"), getEnvOrThrow("SERVICE_ROLE_KEY"), {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+function requireValue(value: unknown, stage: string): asserts value {
+  if (!value) throw new FixtureFailure(stage)
 }
 
-async function allUsers(c: ReturnType<typeof adminClient>) {
-  const r: Array<{ id: string; email: string | undefined; created_at: string }> = [];
-  let p = 1;
-  for (;;) {
-    const { data, error } = await c.auth.admin.listUsers({ page: p, perPage: 100 });
-    if (error) throw new Error(`listUsers p${p}: ${error.message}`);
-    if (!data?.users?.length) break;
-    for (const u of data.users) r.push({ id: u.id, email: u.email, created_at: u.created_at });
-    if (data.users.length < 100) break;
-    p++;
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter {
+  requireValue(url === STAGING_URL, 'environment')
+  const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
+  const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
+  const client = (token: string) => createClient(url, anonKey, {
+    ...options, global: { fetch: boundedFetch, headers: { Authorization: `Bearer ${token}` } },
+  })
+  async function notifications(token: string, series: string, expected: number) {
+    const result = await client(token).from('notifications').select('id')
+      .eq('event_series_id', series).eq('notification_type', 'event_series_registration')
+    requireValue(!result.error && result.data?.length === expected, 'notification-count')
   }
-  return r;
-}
+  async function scenario(plan: FixturePlan, sessions: string[]) {
+    const [host, member] = plan.users
+    const [hostToken, memberToken] = sessions
+    const [seriesId, transitionId] = plan.seriesIds
+    let result = await admin.from('event_series').insert(plan.seriesIds.map((id) => ({
+      id, creator_id: host.id, title: `Fixture ${plan.runId}`, lifecycle_status: 'draft',
+    })))
+    requireValue(!result.error, 'seed-series')
+    result = await admin.from('events').insert(plan.eventIds.map((id, i) => ({
+      id, creator_id: host.id, title: `Fixture ${plan.runId} ${i}`, event_type: 'workshop',
+      start_time: new Date(Date.now() + (7 + i) * 86400000).toISOString(),
+      lifecycle_status: 'draft', publication_status: 'closed',
+      visibility_settings: { type: 'public' }, max_capacity: 10,
+    })))
+    requireValue(!result.error, 'seed-events')
+    result = await admin.from('event_series_membership').insert(plan.eventIds.map((id, i) => ({
+      series_id: plan.seriesIds[Math.floor(i / 2)], event_id: id, position: i % 2 + 1,
+    })))
+    requireValue(!result.error, 'seed-membership')
+    for (const id of plan.seriesIds) {
+      const published = await client(hostToken).functions.invoke('publish-event-series', { body: { series_id: id } })
+      requireValue(!published.error && published.data?.success === true, 'publish-series')
+    }
 
-async function delUser(c: ReturnType<typeof adminClient>, uid: string): Promise<string | null> {
-  for (const [tbl, col] of [
-    ["events", "creator_id"], ["event_threads", "profile_id"], ["event_registrations", "reviewed_by"],
-    ["recommendations", "from_profile_id"], ["recommendations", "to_profile_id"],
-    ["blocks", "blocker_id"], ["blocks", "blocked_id"],
-    ["reports", "reporter_id"], ["reports", "target_profile_id"],
-    ["moderation_actions", "admin_id"], ["moderation_actions", "target_profile_id"],
-    ["audit_logs", "actor_id"], ["audit_logs", "target_profile_id"],
-  ] as const) {
-    const { error } = await c.from(tbl).delete().eq(col, uid);
-    if (error) console.error(`clean ${tbl}.${col}: ${error.message}`);
+    const register = await client(memberToken).functions.invoke('register-for-event-series', { body: { series_id: seriesId } })
+    requireValue(!register.error && register.data?.success === true && register.data?.event_registration_count === 2, 'register')
+    await notifications(hostToken, seriesId, 1)
+    await notifications(memberToken, seriesId, 0)
+    const duplicate = await client(memberToken).functions.invoke('register-for-event-series', { body: { series_id: seriesId } })
+    requireValue(duplicate.error?.context instanceof Response && duplicate.error.context.status === 400, 'duplicate-status')
+    const duplicateBody = await duplicate.error.context.json()
+    requireValue(duplicateBody.error?.code === 'duplicate_registration', 'duplicate-code')
+    await notifications(hostToken, seriesId, 1)
+
+    result = await admin.from('event_series_registrations').insert({
+      series_id: transitionId, profile_id: member.id, status: 'pending', whole_series_registration: false,
+    })
+    requireValue(!result.error, 'seed-pending')
+    await notifications(hostToken, transitionId, 0)
+    for (let i = 0; i < 2; i++) {
+      result = await admin.from('event_series_registrations').update({ status: 'approved' })
+        .eq('series_id', transitionId).eq('profile_id', member.id)
+      requireValue(!result.error, 'approve-transition')
+      await notifications(hostToken, transitionId, 1)
+    }
+    await notifications(memberToken, transitionId, 0)
+    return ['authenticated-series-registration', 'host-notification-once', 'nonrecipient-denied',
+      'duplicate-registration-denied', 'service-fixture-pending-silent', 'service-fixture-approval-once']
   }
-  const { error: pe } = await c.from("profiles").delete().eq("id", uid);
-  if (pe) return `profile delete: ${pe.message}`;
-  const { error: ae } = await c.auth.admin.deleteUser(uid);
-  if (ae) return `auth delete: ${ae.message}`;
-  return null;
-}
 
-async function cmdCreate(emailArg?: string) {
-  const email = emailArg ?? genEmail();
-  if (!testEmail(email)) { console.error("Email must match test prefix"); Deno.exit(1); }
-  const c = adminClient();
-  const { data: u, error: ce } = await c.auth.admin.createUser({ email, password: DEFAULT_PASSWORD, email_confirm: true });
-  if (ce || !u?.user) { console.error(`Create fail: ${ce?.message}`); Deno.exit(1); }
-  const { error: pe } = await c.from("profiles").upsert({
-    id: u.user.id, display_name: email.split("@")[0], role_status: "general", reputation_score: 0,
-  }, { onConflict: "id" });
-  if (pe) { console.error(`Profile fail: ${pe.message}`); await delUser(c, u.user.id); Deno.exit(1); }
-  const uc = createClient(getEnvOrThrow("SUPABASE_URL"), getEnvOrThrow("SUPABASE_ANON_KEY"));
-  const { data: s, error: se } = await uc.auth.signInWithPassword({ email, password: DEFAULT_PASSWORD });
-  if (se || !s?.session) { console.error(`Signin fail: ${se?.message}`); await delUser(c, u.user.id); Deno.exit(1); }
-  console.log(JSON.stringify({ email, access_token: s.session.access_token, expires_at: Math.floor(Date.now() / 1000) + s.session.expires_in }));
-}
-
-async function cmdList() {
-  const users = await allUsers(adminClient());
-  const accts = users.filter((u) => u.email && testEmail(u.email)).map((u) => ({ id: u.id, email: u.email, created_at: u.created_at }));
-  console.log(JSON.stringify({ count: accts.length, accounts: accts }, null, 2));
-}
-
-async function cmdCleanup() {
-  const c = adminClient();
-  const users = await allUsers(c);
-  const todo = users.filter((u) => u.email && testEmail(u.email));
-  let deleted = 0, failed = 0;
-  for (const u of todo) {
-    const err = await delUser(c, u.id);
-    if (err) { console.error(`Fail ${u.email}: ${err}`); failed++; } else deleted++;
+  return {
+    async provision(user, runId) {
+      const created = await admin.auth.admin.createUser({
+        id: user.id, email: user.email, password: user.password, email_confirm: true,
+        app_metadata: { fixture_run_id: runId },
+      })
+      requireValue(!created.error && created.data.user?.id === user.id, 'create-user')
+      const profile = await admin.from('profiles').upsert({
+        id: user.id, display_name: 'Synthetic fixture', role_status: 'general', reputation_score: 0,
+        external_social_links: [{ url: 'https://x.com/fixture' }],
+      })
+      requireValue(!profile.error, 'create-profile')
+    },
+    async login(user) {
+      const auth = createClient(url, anonKey, { ...options, global: { fetch: boundedFetch } })
+      const result = await auth.auth.signInWithPassword({ email: user.email, password: user.password })
+      requireValue(!result.error && result.data.user?.id === user.id && result.data.session, 'login')
+      const assurance = await auth.auth.mfa.getAuthenticatorAssuranceLevel()
+      requireValue(!assurance.error && assurance.data?.currentLevel === 'aal1', 'aal')
+      return result.data.session.access_token
+    },
+    scenario,
+    async owner(id) {
+      const result = await admin.auth.admin.getUserById(id)
+      if (result.error?.status === 404) return null
+      requireValue(!result.error && result.data.user, 'owner-query')
+      return result.data.user.app_metadata.fixture_run_id ?? 'unowned'
+    },
+    async revoke(token) {
+      const result = await admin.auth.admin.signOut(token, 'global')
+      requireValue(!result.error, 'revoke-session')
+    },
+    async cleanData(plan) {
+      const host = plan.users[0].id
+      // Only known fixture IDs are removed. Unknown foreign-key dependencies fail closed.
+      const series = await admin.from('event_series').delete().in('id', plan.seriesIds).eq('creator_id', host)
+      requireValue(!series.error, 'cleanup-series')
+      const events = await admin.from('events').delete().in('id', plan.eventIds).eq('creator_id', host)
+      requireValue(!events.error, 'cleanup-events')
+      const remainingSeries = await admin.from('event_series').select('id').in('id', plan.seriesIds)
+      const remainingEvents = await admin.from('events').select('id').in('id', plan.eventIds)
+      requireValue(!remainingSeries.error && remainingSeries.data?.length === 0 &&
+        !remainingEvents.error && remainingEvents.data?.length === 0, 'cleanup-data-verification')
+    },
+    async removeUser(id) {
+      const profile = await admin.from('profiles').delete().eq('id', id)
+      requireValue(!profile.error, 'cleanup-profile')
+      const auth = await admin.auth.admin.deleteUser(id)
+      requireValue(!auth.error, 'cleanup-auth')
+      const remaining = await admin.auth.admin.getUserById(id)
+      requireValue(remaining.error?.status === 404, 'cleanup-auth-verification')
+    },
   }
-  console.log(JSON.stringify({ deleted, failed, total: todo.length }));
-  if (failed > 0) Deno.exit(1);
 }
 
-const m = Deno.args[0];
-if (!m || m === "--help") { console.log("Commands: create [email], list, cleanup"); Deno.exit(0); }
-const cmds: Record<string, () => Promise<void>> = { create: () => cmdCreate(Deno.args[1]), list: cmdList, cleanup: cmdCleanup };
-if (!cmds[m]) { console.error(`Unknown: ${m}`); Deno.exit(1); }
-await cmds[m]();
+async function main() {
+  const command = Deno.args[0]
+  requireValue(command === 'list' || command === 'verify-series-notification', 'command')
+  const url = Deno.env.get('SUPABASE_URL')
+  requireValue(url === STAGING_URL, 'environment')
+  const serviceKey = Deno.env.get('SERVICE_ROLE_KEY')
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY')
+  requireValue(serviceKey && anonKey, 'configuration')
+  if (command === 'list') {
+    const admin = createClient(url, serviceKey, options)
+    let count = 0
+    for (let page = 1; ; page++) {
+      const result = await admin.auth.admin.listUsers({ page, perPage: 100 })
+      requireValue(!result.error, 'list')
+      count += result.data.users.filter((u) => u.email?.startsWith('iac.patrol.test.')).length
+      if (result.data.users.length < 100) break
+    }
+    console.log(JSON.stringify({ count }))
+    return
+  }
+  const result = await runFixture(url, createAdapter(url, serviceKey, anonKey),
+    (runId) => console.log(JSON.stringify({ runId, stage: 'started' })))
+  console.log(JSON.stringify({ ...result, project: 'xdknuxdhyvjgwlcliyqx', role: 'authenticated', aal: 'aal1' }))
+  if (!result.ok) Deno.exitCode = 1
+}
+
+if (import.meta.main) {
+  try { await main() } catch {
+    console.error(JSON.stringify({ ok: false, stage: 'configuration-or-list' }))
+    Deno.exitCode = 1
+  }
+}
