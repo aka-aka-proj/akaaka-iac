@@ -4,6 +4,8 @@ Implementation status for issue #167:
 - fail-closed API behavior: complete
 - regression test script: complete
 - token capability documentation: complete
-- weekly-production-release.yml wiring: pending
+- weekly-production-release.yml wiring: complete
 
-Do not merge until the workflow wiring is complete and dry-run validation passes.
+The docs, IaC, and frontend polling loops now invoke the helper with their
+already-pinned candidate SHA. Mergeability is read separately through the REST
+pull request endpoint. Keep this PR draft until CI and a dry-run succeed.
