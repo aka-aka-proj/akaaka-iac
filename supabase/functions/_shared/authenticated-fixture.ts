@@ -16,6 +16,7 @@ export interface FixtureAdapter {
   revoke(session: string): Promise<void>
   cleanData(plan: FixturePlan): Promise<void>
   removeUser(id: string): Promise<void>
+  recover(runId: string): Promise<FixturePlan>
 }
 
 export function makeFixturePlan(): FixturePlan {
@@ -43,6 +44,22 @@ async function cleanFixture(adapter: FixtureAdapter, plan: FixturePlan) {
   }
   await adapter.cleanData(plan)
   for (const id of existing) await adapter.removeUser(id)
+}
+
+function validRunId(runId: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(runId)
+}
+
+export async function cleanupRun(runId: string, adapter: FixtureAdapter) {
+  if (!validRunId(runId)) return { ok: false, runId, stage: 'run-id', cleanup: 'not-needed' as const }
+  try {
+    const plan = await adapter.recover(runId)
+    if (plan.runId !== runId || plan.users.length === 0) throw new FixtureFailure('recovery-scope')
+    await cleanFixture(adapter, plan)
+    return { ok: true, runId, stage: 'complete', cleanup: 'passed' as const }
+  } catch (error) {
+    return { ok: false, runId, stage: error instanceof FixtureFailure ? error.message : 'recovery', cleanup: 'failed' as const }
+  }
 }
 
 export async function runFixture(url: string, adapter: FixtureAdapter, started: (runId: string) => void = () => {}) {
