@@ -11,6 +11,11 @@ on:
         options:
           - list
           - verify-series-notification
+          - cleanup-run
+      run_id:
+        description: 'UUID run identity required only for cleanup-run'
+        required: false
+        type: string
 
 concurrency:
   group: auth-test-agent-staging
@@ -50,4 +55,5 @@ jobs:
           deno check --config supabase/functions/deno.json supabase/functions/testing/authenticated-test-agent.ts
           deno run --allow-env --allow-net --config supabase/functions/deno.json \
             supabase/functions/testing/authenticated-test-agent.ts \
-            "${{ github.event.inputs.command }}"
+            "${{ github.event.inputs.command }}" \
+            "${{ github.event.inputs.run_id }}"

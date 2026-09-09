@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import { FixtureFailure, runFixture, STAGING_URL, type FixtureAdapter, type FixturePlan } from '../_shared/authenticated-fixture.ts'
+import { cleanupRun, FixtureFailure, runFixture, STAGING_URL, type FixtureAdapter, type FixturePlan } from '../_shared/authenticated-fixture.ts'
 
 const options = { auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false } }
 
@@ -104,14 +104,18 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     async cleanData(plan) {
       const host = plan.users[0].id
       // Only known fixture IDs are removed. Unknown foreign-key dependencies fail closed.
-      const series = await admin.from('event_series').delete().in('id', plan.seriesIds).eq('creator_id', host)
-      requireValue(!series.error, 'cleanup-series')
-      const events = await admin.from('events').delete().in('id', plan.eventIds).eq('creator_id', host)
-      requireValue(!events.error, 'cleanup-events')
-      const remainingSeries = await admin.from('event_series').select('id').in('id', plan.seriesIds)
-      const remainingEvents = await admin.from('events').select('id').in('id', plan.eventIds)
-      requireValue(!remainingSeries.error && remainingSeries.data?.length === 0 &&
-        !remainingEvents.error && remainingEvents.data?.length === 0, 'cleanup-data-verification')
+      if (plan.seriesIds.length > 0) {
+        const series = await admin.from('event_series').delete().in('id', plan.seriesIds).eq('creator_id', host)
+        requireValue(!series.error, 'cleanup-series')
+        const remainingSeries = await admin.from('event_series').select('id').in('id', plan.seriesIds)
+        requireValue(!remainingSeries.error && remainingSeries.data?.length === 0, 'cleanup-series-verification')
+      }
+      if (plan.eventIds.length > 0) {
+        const events = await admin.from('events').delete().in('id', plan.eventIds).eq('creator_id', host)
+        requireValue(!events.error, 'cleanup-events')
+        const remainingEvents = await admin.from('events').select('id').in('id', plan.eventIds)
+        requireValue(!remainingEvents.error && remainingEvents.data?.length === 0, 'cleanup-events-verification')
+      }
     },
     async removeUser(id) {
       const profile = await admin.from('profiles').delete().eq('id', id)
@@ -121,12 +125,44 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       const remaining = await admin.auth.admin.getUserById(id)
       requireValue(remaining.error?.status === 404, 'cleanup-auth-verification')
     },
+    async recover(runId) {
+      const users: Array<{ id: string; email: string; password: string }> = []
+      for (let page = 1; ; page++) {
+        const result = await admin.auth.admin.listUsers({ page, perPage: 100 })
+        requireValue(!result.error, 'recovery-users')
+        users.push(...result.data.users
+          .filter((user) => user.app_metadata.fixture_run_id === runId)
+          .map((user) => ({ id: user.id, email: user.email ?? '', password: '' })))
+        if (result.data.users.length < 100) break
+      }
+      requireValue(users.length > 0 && users.every((user) => user.email.startsWith('iac.patrol.test.')), 'recovery-scope')
+      const userIds = users.map((user) => user.id)
+      const series = await admin.from('event_series').select('id, creator_id')
+        .eq('title', `Fixture ${runId}`)
+      requireValue(!series.error && (series.data ?? []).every((row) => userIds.includes(row.creator_id)), 'recovery-series')
+      const creators = [...new Set((series.data ?? []).map((row) => row.creator_id))]
+      requireValue(creators.length <= 1, 'recovery-scope')
+      const hostId = creators[0]
+      const events = await admin.from('events').select('id, creator_id')
+        .in('creator_id', userIds).like('title', `Fixture ${runId} %`)
+      requireValue(!events.error && (events.data ?? []).every((row) => row.creator_id === hostId), 'recovery-events')
+      const orderedUsers = hostId ? [
+        ...users.filter((user) => user.id === hostId),
+        ...users.filter((user) => user.id !== hostId),
+      ] : users
+      return {
+        runId,
+        users: orderedUsers,
+        seriesIds: (series.data ?? []).map((row) => row.id),
+        eventIds: (events.data ?? []).map((row) => row.id),
+      }
+    },
   }
 }
 
 async function main() {
   const command = Deno.args[0]
-  requireValue(command === 'list' || command === 'verify-series-notification', 'command')
+  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'cleanup-run', 'command')
   const url = Deno.env.get('SUPABASE_URL')
   requireValue(url === STAGING_URL, 'environment')
   const serviceKey = Deno.env.get('SERVICE_ROLE_KEY')
@@ -142,6 +178,12 @@ async function main() {
       if (result.data.users.length < 100) break
     }
     console.log(JSON.stringify({ count }))
+    return
+  }
+  if (command === 'cleanup-run') {
+    const result = await cleanupRun(Deno.args[1] ?? '', createAdapter(url, serviceKey, anonKey))
+    console.log(JSON.stringify({ ...result, project: 'xdknuxdhyvjgwlcliyqx' }))
+    if (!result.ok) Deno.exitCode = 1
     return
   }
   const result = await runFixture(url, createAdapter(url, serviceKey, anonKey),

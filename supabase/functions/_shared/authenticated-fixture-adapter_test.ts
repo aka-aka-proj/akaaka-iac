@@ -46,3 +46,44 @@ for (const point of ['profile', 'login']) {
     assert(!requests.some((r) => r.startsWith('GET /auth/v1/admin/users?')))
   })
 }
+
+function recoveryTransport(foreignSeries = false): typeof fetch {
+  return (input, init) => {
+    const url = new URL(String(input))
+    const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), {
+      status, headers: { 'Content-Type': 'application/json' },
+    }))
+    if (url.pathname === '/auth/v1/admin/users') {
+      assert(url.searchParams.get('page') === '1')
+      return json({ users: [
+        { id: 'host', email: 'iac.patrol.test.host@example.com', app_metadata: { fixture_run_id: '00000000-0000-4000-8000-000000000999' } },
+        { id: 'member', email: 'iac.patrol.test.member@example.com', app_metadata: { fixture_run_id: '00000000-0000-4000-8000-000000000999' } },
+        { id: 'other', email: 'iac.patrol.test.other@example.com', app_metadata: { fixture_run_id: '00000000-0000-4000-8000-000000000998' } },
+      ] })
+    }
+    if (url.pathname === '/rest/v1/event_series') {
+      assert(url.searchParams.get('title') === 'eq.Fixture 00000000-0000-4000-8000-000000000999')
+      return json([{ id: 'series-1', creator_id: foreignSeries ? 'other' : 'host' }])
+    }
+    if (url.pathname === '/rest/v1/events') {
+      assert(url.searchParams.get('creator_id')?.includes('host'))
+      assert(url.searchParams.get('title') === 'like.Fixture 00000000-0000-4000-8000-000000000999 %')
+      return json([{ id: 'event-1', creator_id: 'host' }])
+    }
+    throw new Error(`unexpected ${init?.method ?? 'GET'} ${url.pathname}`)
+  }
+}
+
+Deno.test('Supabase adapter recovery scopes to matching metadata and fixture tags', async () => {
+  const adapter = createAdapter(STAGING_URL, 'service-secret', 'anon-secret', recoveryTransport())
+  const plan = await adapter.recover('00000000-0000-4000-8000-000000000999')
+  assert(plan.users.map((user) => user.id).join(',') === 'host,member')
+  assert(plan.seriesIds.join(',') === 'series-1' && plan.eventIds.join(',') === 'event-1')
+})
+
+Deno.test('Supabase adapter recovery rejects a fixture tag owned by another run', async () => {
+  const adapter = createAdapter(STAGING_URL, 'service-secret', 'anon-secret', recoveryTransport(true))
+  let rejected = false
+  try { await adapter.recover('00000000-0000-4000-8000-000000000999') } catch { rejected = true }
+  assert(rejected)
+})
