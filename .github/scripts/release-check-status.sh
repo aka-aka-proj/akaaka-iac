@@ -16,6 +16,8 @@ trap 'rm -f "$checks_tmp" "$status_tmp"' EXIT
 if ! gh api \
   -H 'Accept: application/vnd.github+json' \
   -H 'X-GitHub-Api-Version: 2022-11-28' \
+  --paginate \
+  --slurp \
   "repos/$repo/commits/$sha/check-runs?per_page=100" >"$checks_tmp"; then
   fail "cannot read check-runs for $repo@$sha; release readiness is unknown"
 fi
@@ -23,29 +25,30 @@ fi
 if ! gh api \
   -H 'Accept: application/vnd.github+json' \
   -H 'X-GitHub-Api-Version: 2022-11-28' \
-  "repos/$repo/commits/$sha/status" >"$status_tmp"; then
+  "repos/$repo/commits/$sha/status?per_page=100" >"$status_tmp"; then
   fail "cannot read commit statuses for $repo@$sha; release readiness is unknown"
 fi
 
 jq -n \
-  --slurpfile checks "$checks_tmp" \
+  --slurpfile check_pages "$checks_tmp" \
   --slurpfile statuses "$status_tmp" '
-  def check_failed:
-    ["failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"] | index(.) != null;
-  def status_failed:
-    ["failure", "error"] | index(.) != null;
-  {
+  def check_failed($value):
+    ["failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"] | index($value) != null;
+  def status_failed($value):
+    ["failure", "error"] | index($value) != null;
+  ($check_pages[0] | map(.check_runs // []) | add // []) as $checks
+  | {
     failed: (
-      ([ $checks[0].check_runs[]? | (.conclusion // "") | select(check_failed) ] | length)
+      ([ $checks[]? | (.conclusion // "") as $conclusion | select(check_failed($conclusion)) ] | length)
       +
-      ([ $statuses[0].statuses[]? | (.state // "") | select(status_failed) ] | length)
+      ([ $statuses[0].statuses[]? | (.state // "") as $state | select(status_failed($state)) ] | length)
     ),
     pending: (
-      ([ $checks[0].check_runs[]? | select((.status // "") != "completed") ] | length)
+      ([ $checks[]? | select((.status // "") != "completed") ] | length)
       +
       ([ $statuses[0].statuses[]? | (.state // "") | select(. == "pending") ] | length)
     ),
-    check_runs: ($checks[0].check_runs | length),
+    check_runs: ($checks | length),
     statuses: ($statuses[0].statuses | length)
   }
 '
