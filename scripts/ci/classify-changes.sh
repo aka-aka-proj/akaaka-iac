@@ -15,7 +15,7 @@ while IFS= read -r file; do
       functions=true
       cloudflare=true
       ;;
-    README.md|AGENTS.md|docs/*|.github/pull_request_template.md|.github/workflows/*)
+    README.md|AGENTS.md|docs/*|.opencode/*|.github/pull_request_template.md|.github/workflows/*)
       # Known governance-only paths do not need runtime runners.
       ;;
     supabase/migrations/*|supabase/tests/*|supabase/config.toml)

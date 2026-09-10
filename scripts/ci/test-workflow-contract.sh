@@ -23,6 +23,8 @@ require_literal "$workflow" 'migrations: ${{ steps.changes.outputs.migrations }}
 require_literal "$workflow" 'functions: ${{ steps.changes.outputs.functions }}'
 require_literal "$workflow" 'cloudflare: ${{ steps.changes.outputs.cloudflare }}'
 require_literal "$workflow" "needs: contract-gate"
+require_literal "$workflow" "MIGRATIONS_REQUESTED: \${{ github.event_name == 'workflow_dispatch' || needs.contract-gate.outputs.migrations == 'true' }}"
+require_literal "$workflow" "if: env.MIGRATIONS_REQUESTED == 'true'"
 require_literal "$workflow" 'scripts/ci/test-workflow-contract.sh'
 require_literal "$workflow" 'scripts/ci/test-validate-pr-contract.sh'
 require_literal "$metadata_workflow" 'types: [edited]'
@@ -32,7 +34,7 @@ require_literal "$fetch_contract" 'changed_files'
 require_literal "$fetch_contract" '-ge 3000'
 require_literal "$template" 'Compatibility: backward-compatible'
 require_literal "$template" 'Docs: none'
-require_literal "$hook" 'supabase status'
+require_literal "$hook" "docker inspect --format '{{.State.Running}}' supabase_db_akaaka-iac"
 require_literal "$hook" 'git status --porcelain'
 require_literal "$hook" 'git rev-parse HEAD'
 require_literal "$hook" '--no-renames --name-only'

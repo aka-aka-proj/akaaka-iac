@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - preview
-    paths:
-      - "supabase/migrations/**"
-      - "supabase/functions/**"
-      - ".github/workflows/iac-staging-cd.yml"
   workflow_dispatch:
 
 permissions:
