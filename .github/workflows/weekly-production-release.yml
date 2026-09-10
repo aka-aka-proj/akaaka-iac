@@ -200,14 +200,18 @@ jobs:
             # 等 checks 全數完成且成功；有失敗立即跳過該 PR（stage 共享 deadline）
             ok=1
             while :; do
-              rollup="$(gh pr view "$n" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
-              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
-              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
-              mstate="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
-              if [ "${bad:-0}" -gt 0 ] || [ "$mstate" = "DIRTY" ]; then
+              if ! checks="$("$GITHUB_WORKSPACE/.github/scripts/release-check-status.sh" "$REPO" "$expect_head")"; then
+                detail+="PR #$n readiness unknown (REST check/status read failed); "; ok=0; break
+              fi
+              bad="$(printf '%s' "$checks" | jq -r '.failed')"
+              pending="$(printf '%s' "$checks" | jq -r '.pending')"
+              if ! mstate="$(gh api "repos/$REPO/pulls/$n" --jq '.mergeable_state // "unknown"')"; then
+                detail+="PR #$n mergeability unknown (REST pull read failed); "; ok=0; break
+              fi
+              if [ "${bad:-0}" -gt 0 ] || [ "$mstate" = "dirty" ]; then
                 detail+="PR #$n checks failed/conflicted; "; ok=0; break
               fi
-              if [ "${pending:-0}" -eq 0 ] && { [ "$mstate" = "CLEAN" ] || [ "$mstate" = "HAS_HOOKS" ] || [ "$mstate" = "UNBLOCKED" ]; }; then
+              if [ "${pending:-0}" -eq 0 ] && { [ "$mstate" = "clean" ] || [ "$mstate" = "has_hooks" ]; }; then
                 break
               fi
               if (( SECONDS >= stage_deadline )); then
@@ -470,17 +474,21 @@ jobs:
             # 等 checks 全數完成且成功；有失敗立即中止（未達 merge，屬 pre-merge 停止）
             deadline=$((SECONDS + 2700))
             while :; do
-              rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
-              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
+              if ! checks="$("$GITHUB_WORKSPACE/.github/scripts/release-check-status.sh" "$REPO" "$PINNED_SHA")"; then
+                detail="PR #$pr readiness unknown (REST check/status read failed)"; exit 0
+              fi
+              bad="$(printf '%s' "$checks" | jq -r '.failed')"
               if [ "${bad:-0}" -gt 0 ]; then
                 detail="PR #$pr checks failed"; exit 0
               fi
-              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
-              state="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
-              if [ "$state" = "DIRTY" ]; then
+              pending="$(printf '%s' "$checks" | jq -r '.pending')"
+              if ! state="$(gh api "repos/$REPO/pulls/$pr" --jq '.mergeable_state // "unknown"')"; then
+                detail="PR #$pr mergeability unknown (REST pull read failed)"; exit 0
+              fi
+              if [ "$state" = "dirty" ]; then
                 detail="PR #$pr has merge conflicts with main; manual resolution required"; exit 0
               fi
-              if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "CLEAN" ] || [ "$state" = "HAS_HOOKS" ] || [ "$state" = "UNBLOCKED" ]; }; then
+              if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "clean" ] || [ "$state" = "has_hooks" ]; }; then
                 break
               fi
               if (( SECONDS >= deadline )); then
@@ -896,17 +904,21 @@ jobs:
 
             deadline=$((SECONDS + 3600))
             while :; do
-              rollup="$(gh pr view "$pr" -R "$REPO" --json statusCheckRollup,mergeStateStatus)"
-              bad="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | (.conclusion // .state // "") | select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")] | length')"
+              if ! checks="$("$GITHUB_WORKSPACE/.github/scripts/release-check-status.sh" "$REPO" "$PINNED_SHA")"; then
+                detail="PR #$pr readiness unknown (REST check/status read failed)"; exit 0
+              fi
+              bad="$(printf '%s' "$checks" | jq -r '.failed')"
               if [ "${bad:-0}" -gt 0 ]; then
                 detail="PR #$pr checks failed"; exit 0
               fi
-              pending="$(printf '%s' "$rollup" | jq -r '[.statusCheckRollup[]? | select((.status == "QUEUED" or .status == "IN_PROGRESS" or .status == "PENDING") or ((.state // "") == "PENDING"))] | length')"
-              state="$(printf '%s' "$rollup" | jq -r '.mergeStateStatus')"
-              if [ "$state" = "DIRTY" ]; then
+              pending="$(printf '%s' "$checks" | jq -r '.pending')"
+              if ! state="$(gh api "repos/$REPO/pulls/$pr" --jq '.mergeable_state // "unknown"')"; then
+                detail="PR #$pr mergeability unknown (REST pull read failed)"; exit 0
+              fi
+              if [ "$state" = "dirty" ]; then
                 detail="PR #$pr has merge conflicts with main; manual resolution required"; exit 0
               fi
-              if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "CLEAN" ] || [ "$state" = "HAS_HOOKS" ] || [ "$state" = "UNBLOCKED" ]; }; then
+              if [ "${pending:-0}" -eq 0 ] && { [ "$state" = "clean" ] || [ "$state" = "has_hooks" ]; }; then
                 break
               fi
               if (( SECONDS >= deadline )); then
