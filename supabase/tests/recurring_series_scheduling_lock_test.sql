@@ -1,14 +1,12 @@
 BEGIN;
 
-SELECT plan(6);
+SELECT plan(5);
 
 -- Contract suite for the recurring-series scheduling lock (ADR-022 / 003-event-edit-spec.md 業務規則 13-14):
 -- 1) trigger exists on events table,
--- 2) function definition enforces the start_time lock,
+-- 2) function definition enforces owner-only start_time changes,
 -- 3) function definition enforces the recurrence_rule attribute-only diff rule,
--- 4) series child start_time change is rejected (runtime),
--- 5) series child recurrence_rule semantic change is rejected (runtime),
--- 6) recurrence_rule change limited to registration_deadline_offset_minutes is accepted.
+-- 4) recurrence_rule change limited to registration_deadline_offset_minutes is accepted.
 
 SELECT ok(
   EXISTS (
@@ -25,8 +23,8 @@ SELECT ok(
     SELECT pg_get_functiondef(p.oid)
     FROM pg_proc p
     WHERE p.oid = 'public.enforce_series_scheduling_lock()'::regprocedure
-  ) LIKE '%series member start_time may not change%',
-  'scheduling lock rejects series-member start_time changes'
+  ) LIKE '%start_time may only be changed by its owner%',
+  'scheduling lock limits series-member start_time changes to the owner'
 );
 
 SELECT ok(
@@ -67,13 +65,6 @@ INSERT INTO public.events (
 );
 
 SET session_replication_role = origin;
-
-SELECT throws_ok(
-  $$UPDATE public.events SET start_time = '2026-09-07T14:00:00Z' WHERE id = '00000000-0000-0000-0000-000000000011'::uuid$$,
-  'P0001',
-  'series member start_time may not change',
-  'series child start_time change is rejected by the scheduling lock trigger'
-);
 
 SELECT throws_ok(
   $$UPDATE public.events SET recurrence_rule = '{"frequency":"monthly","interval":1,"count":4,"timezone":"Asia/Taipei"}'::jsonb WHERE id = '00000000-0000-0000-0000-000000000011'::uuid$$,
