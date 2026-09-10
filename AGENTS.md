@@ -5,6 +5,7 @@
 - **Worktree 強制規則：** 每個 coding agent session 必須使用自己的 git worktree 與唯一 task branch，不得在共用 checkout 或直接綁定 `preview` worktree 上修改。開始前執行 `rtk git fetch origin`，再從 `origin/preview` 建立 worktree，例如：`rtk git worktree add -b feat/<task> ../akaaka-iac-feat-<task> origin/preview`。
 - **Push 前 local validation gate：** 新 clone／worktree 先執行 `rtk sh scripts/install-git-hooks.sh`。版本控制的 `.githooks/pre-push` 會先跑 changed-path router contract；migration/test、Edge Function、Cloudflare 變更再分別執行完整 local pgTAP、Deno lint/check/test、Wrangler dry-run。不得以 `--no-verify` 規避失敗；local pass 不取代 GitHub required checks。
 - Git 版本流程：task branch 只提交並 push 到自己的遠端分支，先建立 task branch → `preview` Pull Request 並合併；不得直接 push `preview`。在 `preview` 驗證通過後，再建立 `preview` → `main` Pull Request，禁止直接 push `main`。Preview IaC 驗證目標為 Supabase project `xdknuxdhyvjgwlcliyqx`；Production 只能由合併後的 `main` 流程部署，並以 GitHub secret 注入 production project ref。
+- **PR lifecycle ownership：** 任何 agent 建立 Pull Request 後都必須繼續負責該 PR 的收尾，不得把「PR 已建立」視為完成。建立 PR 後需檢查 required checks、review 狀態、comments 與 unresolved conversations；能自行修正的問題要直接修正、commit、push 並重新確認 checks，必要時處理 rebase／merge conflict。當所有條件滿足且權限允許時，主動嘗試 merge；只有遇到無法以現有 repository/tool access 解決、確實需要使用者處理的 blocker 時才停止，並清楚回報最小必要操作。
 - 任務完成且不再需要 worktree 後，先確認無未提交變更，再執行 `rtk git worktree remove <worktree-path>`；不得移除仍被其他 session 使用的 worktree。
 - 進行 AkaAka 功能、修正或架構變更時，先載入 `../.opencode/skills/akaaka-docs/SKILL.md` 並閱讀 `../akaaka-docs/AGENTS.md`，再在 `../akaaka-docs/` 的規格與 ADR 中確認需求；文件必須先於或同步於基礎設施變更更新。
 ## Supabase 環境與 Anon Key
