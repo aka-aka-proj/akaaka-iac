@@ -8,10 +8,6 @@ on:
       - "supabase/migrations/**"
       - "supabase/functions/**"
       - ".github/workflows/iac-staging-cd.yml"
-  pull_request:
-    branches:
-      - main
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
