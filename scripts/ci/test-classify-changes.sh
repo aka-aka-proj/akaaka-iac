@@ -26,6 +26,7 @@ cloudflare=true'
 
 assert_case metadata-only "$none" 'README.md'
 assert_case workflow-only "$none" '.github/workflows/weekly-production-release.yml'
+assert_case opencode-command "$none" '.opencode/commands/work-issue.md'
 assert_case migration 'migrations=true
 functions=false
 cloudflare=false' 'supabase/migrations/20260901000000_example.sql'
