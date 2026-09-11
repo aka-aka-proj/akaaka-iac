@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "generated_at": "2026-09-04T04:41:59Z",
+  "generated_at": "2026-09-11T04:48:55Z",
   "repos": {
     "iac": {
       "result": "failed",
@@ -8,16 +8,16 @@
       "sha": "",
       "deploy": "unknown",
       "smoke": "",
-      "class": "",
+      "class": "pre-merge-skipped",
       "run_id": "",
       "detail": "",
       "pending_expands": []
     },
     "frontend": {
-      "result": "",
+      "result": "skipped-upstream",
       "pr": null,
       "sha": "",
-      "deploy": "",
+      "deploy": "unknown",
       "smoke": "",
       "class": "",
       "vercel_uid": "",
@@ -30,7 +30,7 @@
       "sha": "",
       "deploy": "not-applicable",
       "smoke": "",
-      "class": "",
+      "class": "pre-merge-skipped",
       "detail": ""
     }
   },
