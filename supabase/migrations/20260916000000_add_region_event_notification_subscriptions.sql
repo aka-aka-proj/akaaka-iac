@@ -1,4 +1,5 @@
 -- Add region targets to event notification subscriptions (docs issue #169).
+-- Contract: akaaka-docs PR #201.
 ALTER TABLE public.event_notification_subscriptions
   ADD COLUMN IF NOT EXISTS location_region TEXT;
 
