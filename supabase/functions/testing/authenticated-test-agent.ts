@@ -7,6 +7,15 @@ function requireValue(value: unknown, stage: string): asserts value {
   if (!value) throw new FixtureFailure(stage)
 }
 
+function safeHttpFailureStage(operation: string, error: unknown): string {
+  const status = error && typeof error === 'object' && 'status' in error
+    ? (error as { status?: unknown }).status
+    : undefined
+  return typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 599
+    ? `${operation}-http-${status}`
+    : `${operation}-unknown`
+}
+
 export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
@@ -71,11 +80,17 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
 
   return {
     async provision(user, runId) {
-      const created = await admin.auth.admin.createUser({
-        id: user.id, email: user.email, password: user.password, email_confirm: true,
-        app_metadata: { fixture_run_id: runId },
-      })
-      requireValue(!created.error && created.data.user?.id === user.id, 'create-user')
+      let created
+      try {
+        created = await admin.auth.admin.createUser({
+          id: user.id, email: user.email, password: user.password, email_confirm: true,
+          app_metadata: { fixture_run_id: runId },
+        })
+      } catch {
+        throw new FixtureFailure('create-user-unknown')
+      }
+      requireValue(!created.error && created.data.user?.id === user.id,
+        safeHttpFailureStage('create-user', created.error))
       const profile = await admin.from('profiles').upsert({
         id: user.id, display_name: 'Synthetic fixture', role_status: 'general', reputation_score: 0,
         external_social_links: [{ url: 'https://x.com/fixture' }],
