@@ -1,7 +1,7 @@
 import { createAdapter } from '../testing/authenticated-test-agent.ts'
 import { runFixture, STAGING_URL } from './authenticated-fixture.ts'
 
-function assert(value: unknown): asserts value { if (!value) throw new Error('assertion failed') }
+function assert(value: unknown, message = 'assertion failed'): asserts value { if (!value) throw new Error(message) }
 
 for (const point of ['profile', 'login']) {
   Deno.test(`Supabase adapter cleans only current UUID after ${point} failure without exposing response`, async () => {
@@ -87,3 +87,27 @@ Deno.test('Supabase adapter recovery rejects a fixture tag owned by another run'
   try { await adapter.recover('00000000-0000-4000-8000-000000000999') } catch { rejected = true }
   assert(rejected)
 })
+
+for (const [status, expected] of [[429, 'create-user-http-429'], [503, 'create-user-http-503'], [0, 'create-user-unknown']]) {
+  Deno.test(`Supabase adapter reports a safe create-user failure stage for ${status || 'missing'} status`, async () => {
+    const transport: typeof fetch = (input, init) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/auth/v1/admin/users' && init?.method === 'POST') {
+        if (status === 0) return Promise.reject(new Error('password=TOP_SECRET'))
+        const responseStatus = Number(status) || 500
+        return Promise.resolve(new Response(JSON.stringify({ message: 'password=TOP_SECRET', code: 'unsafe_detail' }), {
+          status: responseStatus, headers: { 'Content-Type': 'application/json' },
+        }))
+      }
+      if (url.pathname.startsWith('/auth/v1/admin/users/')) {
+        return Promise.resolve(new Response(JSON.stringify({ msg: 'User not found' }), { status: 404 }))
+      }
+      if (init?.method === 'DELETE') return Promise.resolve(new Response('[]', { status: 200 }))
+      if (url.pathname.startsWith('/rest/v1/')) return Promise.resolve(new Response('[]', { status: 200 }))
+      throw new Error(`unexpected ${init?.method ?? 'GET'} ${url.pathname}`)
+    }
+    const result = await runFixture(STAGING_URL, createAdapter(STAGING_URL, 'service-secret', 'anon-secret', transport))
+    assert(!result.ok && result.stage === expected && result.cleanup === 'passed', JSON.stringify(result))
+    assert(!JSON.stringify(result).includes('TOP_SECRET'))
+  })
+}
