@@ -11,9 +11,10 @@ cat >"$tmp/gh" <<'GH'
 #!/usr/bin/env bash
 set -euo pipefail
 url="${*: -1}"
-case "$url" in
-  *check-runs*) [ "${MOCK_CHECKS_EXIT:-0}" -eq 0 ] || exit "$MOCK_CHECKS_EXIT"; printf '%s\n' "${MOCK_CHECKS:?}" ;;
-  */status) [ "${MOCK_STATUS_EXIT:-0}" -eq 0 ] || exit "$MOCK_STATUS_EXIT"; printf '%s\n' "${MOCK_STATUS:?}" ;;
+path="${url%%\?*}"
+case "$path" in
+  *check-runs*) [ "${MOCK_CHECKS_EXIT:-0}" -eq 0 ] || exit "$MOCK_CHECKS_EXIT"; printf '[%s]\n' "${MOCK_CHECKS:?}" ;;
+  */status) [ "${MOCK_STATUS_EXIT:-0}" -eq 0 ] || exit "$MOCK_STATUS_EXIT"; printf '[%s]\n' "${MOCK_STATUS:?}" ;;
   *) exit 99 ;;
 esac
 GH
@@ -50,6 +51,12 @@ assert_json \
   '{"check_runs":[{"status":"in_progress","conclusion":null}]}' \
   '{"statuses":[{"state":"pending"}]}' \
   '{"failed":0,"pending":2,"check_runs":1,"statuses":1}'
+
+assert_json \
+  paginated \
+  '{"check_runs":[{"status":"completed","conclusion":"success"}]},{"check_runs":[{"status":"in_progress","conclusion":null},{"status":"completed","conclusion":"failure"}]}' \
+  '{"statuses":[{"state":"success"}]},{"statuses":[{"state":"pending"},{"state":"error"}]}' \
+  '{"failed":2,"pending":2,"check_runs":3,"statuses":3}'
 
 assert_read_failure() {
   local name="$1" endpoint="$2" output
