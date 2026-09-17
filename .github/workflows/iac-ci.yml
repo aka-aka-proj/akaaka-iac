@@ -16,6 +16,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-check-status:
+    name: Verify weekly release REST check helper
+    needs: contract-gate
+    if: ${{ always() && needs.contract-gate.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run REST check-status regression tests
+        run: bash .github/scripts/test-release-check-status.sh
+
   migration-checks:
     name: Verify ${{ matrix.target.name }}
     needs: contract-gate
