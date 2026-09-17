@@ -7,7 +7,7 @@ name: Weekly Production Release
 # 決策記錄：akaaka-docs/docs/adr/020-weekly-scheduled-production-release.md
 #
 # 必要 secrets（akaaka-iac repo）：
-#   AKA_REPO_TOKEN      跨三 repo 的 PAT（contents/pull_requests/actions 權限）
+#   AKA_REPO_TOKEN      跨三 repo 的 PAT（contents、pull requests、actions、checks、commit statuses 權限）
 #   RESEND_API_KEY      Resend API key（寄送狀態報告）
 #   VERCEL_TOKEN        監控 akaaka-frontend production 部署用
 #   VERCEL_ORG_ID       Vercel team/org id
@@ -120,6 +120,7 @@ jobs:
       class: ${{ steps.release.outputs.class }}
       detail: ${{ steps.release.outputs.detail }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Merge approved task -> main PRs
         id: release
         env:
@@ -285,6 +286,7 @@ jobs:
       pending_expands: ${{ steps.release.outputs.pending_expands }}
       detail: ${{ steps.release.outputs.detail }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Ensure preview -> main PR, gates, merge, watch iac-cd
         id: release
         env:
@@ -728,6 +730,7 @@ jobs:
       pending_consumptions: ${{ steps.release.outputs.pending_consumptions }}
       detail: ${{ steps.release.outputs.detail }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Ensure preview -> main PR, merge, watch Vercel, smoke check
         id: release
         env:
