@@ -103,6 +103,31 @@ CREATE TRIGGER guard_event_scheduling_poll
 BEFORE INSERT OR UPDATE ON public.event_scheduling_polls
 FOR EACH ROW EXECUTE FUNCTION public.guard_event_scheduling_poll();
 
+CREATE OR REPLACE FUNCTION public.prevent_event_publication_with_open_poll()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+BEGIN
+  IF OLD.lifecycle_status = 'draft'
+     AND NEW.lifecycle_status <> 'draft'
+     AND EXISTS (
+       SELECT 1 FROM public.event_scheduling_polls p
+       WHERE p.event_id = OLD.id AND p.status = 'open'
+     ) THEN
+    RAISE EXCEPTION 'finalize or delete the open scheduling poll before publishing'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.prevent_event_publication_with_open_poll() FROM PUBLIC;
+
+CREATE TRIGGER prevent_event_publication_with_open_poll
+BEFORE UPDATE OF lifecycle_status ON public.events
+FOR EACH ROW EXECUTE FUNCTION public.prevent_event_publication_with_open_poll();
+
 CREATE OR REPLACE FUNCTION public.guard_event_scheduling_poll_option()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -119,7 +144,8 @@ BEGIN
   IF poll_state IS DISTINCT FROM 'open' THEN
     RAISE EXCEPTION 'poll is closed' USING ERRCODE = 'P0001';
   END IF;
-  IF TG_OP = 'INSERT' AND NEW.kind = 'datetime'
+  IF (TG_OP = 'INSERT' OR NEW.starts_at IS DISTINCT FROM OLD.starts_at)
+     AND NEW.kind = 'datetime'
      AND NEW.starts_at <= timezone('utc', now()) THEN
     RAISE EXCEPTION 'datetime candidate must be in the future'
       USING ERRCODE = '23514';
@@ -208,7 +234,7 @@ BEGIN
   IF poll_state IS DISTINCT FROM 'open' THEN
     RAISE EXCEPTION 'poll is closed' USING ERRCODE = 'P0001';
   END IF;
-  IF EXISTS (
+  IF TG_OP <> 'DELETE' AND EXISTS (
     SELECT 1 FROM public.blocks b
     WHERE (b.blocker_id = poll_owner AND b.blocked_id = voter_id)
        OR (b.blocker_id = voter_id AND b.blocked_id = poll_owner)
@@ -359,6 +385,9 @@ BEGIN
     SELECT starts_at INTO chosen_start FROM public.event_scheduling_poll_options
     WHERE poll_id=p_poll_id AND id=p_datetime_option_id AND kind='datetime';
     IF chosen_start IS NULL THEN RAISE EXCEPTION 'a poll datetime option is required' USING ERRCODE='23514'; END IF;
+    IF chosen_start <= timezone('utc', now()) THEN
+      RAISE EXCEPTION 'chosen datetime must still be in the future' USING ERRCODE='23514';
+    END IF;
   ELSIF p_datetime_option_id IS NOT NULL THEN
     RAISE EXCEPTION 'invalid datetime option' USING ERRCODE='23514';
   END IF;
