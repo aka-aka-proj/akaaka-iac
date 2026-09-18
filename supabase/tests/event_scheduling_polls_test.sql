@@ -24,7 +24,7 @@ SELECT lives_ok($$INSERT INTO public.event_scheduling_polls(id,event_id,creator_
 SELECT lives_ok($$INSERT INTO public.event_scheduling_poll_options(id,poll_id,kind,starts_at,sort_order) VALUES ('18400000-0000-4000-8000-000000000031','18400000-0000-4000-8000-000000000021','datetime',now()+interval '40 days',0),('18400000-0000-4000-8000-000000000032','18400000-0000-4000-8000-000000000021','datetime',now()+interval '41 days',1)$$,'owner adds dates');
 SELECT lives_ok($$INSERT INTO public.event_scheduling_poll_options(id,poll_id,kind,location_label,sort_order) VALUES ('18400000-0000-4000-8000-000000000033','18400000-0000-4000-8000-000000000021','location','Taipei',2),('18400000-0000-4000-8000-000000000034','18400000-0000-4000-8000-000000000021','location','Taoyuan',3)$$,'owner adds locations');
 SELECT lives_ok($$INSERT INTO public.event_scheduling_poll_voters(poll_id,profile_id) VALUES ('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000002')$$,'owner adds voter');
-SELECT throws_ok($$INSERT INTO public.event_scheduling_polls(event_id,creator_id) VALUES ('18400000-0000-4000-8000-000000000012','18400000-0000-4000-8000-000000000003')$$,'42501',NULL,'owner cannot spoof creator');
+SELECT throws_ok($$INSERT INTO public.event_scheduling_polls(event_id,creator_id) VALUES ('18400000-0000-4000-8000-000000000012','18400000-0000-4000-8000-000000000003')$$,'23514',NULL,'owner cannot spoof creator');
 
 SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000002","role":"authenticated"}',true);
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_polls WHERE id='18400000-0000-4000-8000-000000000021'),1,'eligible voter reads poll');
@@ -35,7 +35,7 @@ SELECT is((SELECT vote_count FROM public.get_event_scheduling_poll_results('1840
 
 SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000003","role":"authenticated"}',true);
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_polls WHERE id='18400000-0000-4000-8000-000000000021'),0,'outsider cannot read poll');
-SELECT throws_ok($$INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000031','18400000-0000-4000-8000-000000000003')$$,'23503',NULL,'outsider is not an eligible voter');
+SELECT throws_ok($$INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000031','18400000-0000-4000-8000-000000000003')$$,'42501',NULL,'outsider is not an eligible voter');
 
 RESET ROLE;
 INSERT INTO public.event_scheduling_polls(id,event_id,creator_id) VALUES ('18400000-0000-4000-8000-000000000022','18400000-0000-4000-8000-000000000012','18400000-0000-4000-8000-000000000001');
