@@ -1,14 +1,14 @@
 {
   "version": 2,
-  "generated_at": "2026-09-11T04:48:55Z",
+  "generated_at": "2026-09-18T04:51:20Z",
   "repos": {
     "iac": {
-      "result": "failed",
-      "pr": "https://github.com/aka-aka-proj/akaaka-iac/pull/162",
+      "result": "released",
+      "pr": null,
       "sha": "",
-      "deploy": "unknown",
+      "deploy": "failed",
       "smoke": "",
-      "class": "pre-merge-skipped",
+      "class": "post-merge-failed",
       "run_id": "",
       "detail": "",
       "pending_expands": []
@@ -19,7 +19,7 @@
       "sha": "",
       "deploy": "unknown",
       "smoke": "",
-      "class": "",
+      "class": "pre-merge-skipped",
       "vercel_uid": "",
       "detail": "",
       "pending_consumptions": []
