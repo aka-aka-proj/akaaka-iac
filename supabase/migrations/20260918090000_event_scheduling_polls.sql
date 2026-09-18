@@ -70,7 +70,7 @@ CREATE INDEX event_scheduling_poll_votes_option_idx
 CREATE OR REPLACE FUNCTION public.guard_event_scheduling_poll()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path = public, extensions
 AS $$
 DECLARE
@@ -106,7 +106,7 @@ FOR EACH ROW EXECUTE FUNCTION public.guard_event_scheduling_poll();
 CREATE OR REPLACE FUNCTION public.guard_event_scheduling_poll_option()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = public, extensions
 AS $$
 DECLARE poll_state TEXT;
