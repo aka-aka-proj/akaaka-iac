@@ -70,7 +70,7 @@ CREATE INDEX event_scheduling_poll_votes_option_idx
 CREATE OR REPLACE FUNCTION public.guard_event_scheduling_poll()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = public, extensions
 AS $$
 DECLARE
@@ -113,6 +113,9 @@ DECLARE poll_state TEXT;
 BEGIN
   SELECT status INTO poll_state FROM public.event_scheduling_polls
   WHERE id = COALESCE(NEW.poll_id, OLD.poll_id);
+  -- ON DELETE CASCADE removes the poll before its children. Allow that
+  -- database-owned cleanup path while continuing to reject user mutations.
+  IF TG_OP = 'DELETE' AND poll_state IS NULL THEN RETURN OLD; END IF;
   IF poll_state IS DISTINCT FROM 'open' THEN
     RAISE EXCEPTION 'poll is closed' USING ERRCODE = 'P0001';
   END IF;
@@ -144,6 +147,7 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+REVOKE ALL ON FUNCTION public.guard_event_scheduling_poll_option() FROM PUBLIC;
 
 CREATE TRIGGER guard_event_scheduling_poll_option
 BEFORE INSERT OR UPDATE OR DELETE ON public.event_scheduling_poll_options
@@ -160,6 +164,7 @@ BEGIN
   SELECT creator_id, status INTO poll_owner, poll_state
   FROM public.event_scheduling_polls
   WHERE id = COALESCE(NEW.poll_id, OLD.poll_id);
+  IF TG_OP = 'DELETE' AND poll_state IS NULL THEN RETURN OLD; END IF;
   IF poll_state IS DISTINCT FROM 'open' THEN
     RAISE EXCEPTION 'poll is closed' USING ERRCODE = 'P0001';
   END IF;
@@ -199,6 +204,7 @@ BEGIN
   SELECT creator_id, status INTO poll_owner, poll_state
   FROM public.event_scheduling_polls
   WHERE id = COALESCE(NEW.poll_id, OLD.poll_id);
+  IF TG_OP = 'DELETE' AND poll_state IS NULL THEN RETURN OLD; END IF;
   IF poll_state IS DISTINCT FROM 'open' THEN
     RAISE EXCEPTION 'poll is closed' USING ERRCODE = 'P0001';
   END IF;
