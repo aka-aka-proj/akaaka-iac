@@ -24,7 +24,9 @@ VALUES
  ('b1170000-0000-4000-8000-000000000023', 'b1170000-0000-4000-8000-000000000002', 'Other draft event', 'social', '{"type":"public"}', now()+interval '30 days', 'draft', 'closed'),
  ('b1170000-0000-4000-8000-000000000024', 'b1170000-0000-4000-8000-000000000001', 'Owner published event', 'social', '{"type":"public"}', now()+interval '30 days', 'published', 'published');
 INSERT INTO public.event_series_membership (id, series_id, event_id, position)
-VALUES ('b1170000-0000-4000-8000-000000000031', 'b1170000-0000-4000-8000-000000000011', 'b1170000-0000-4000-8000-000000000022', 1);
+VALUES
+ ('b1170000-0000-4000-8000-000000000031', 'b1170000-0000-4000-8000-000000000011', 'b1170000-0000-4000-8000-000000000022', 1),
+ ('b1170000-0000-4000-8000-000000000032', 'b1170000-0000-4000-8000-000000000013', 'b1170000-0000-4000-8000-000000000023', 1);
 SET LOCAL session_replication_role = origin;
 -- Isolate RLS from environment-dependent default table grants. Rolled back below.
 GRANT SELECT, INSERT, UPDATE ON public.event_series_membership TO authenticated;
