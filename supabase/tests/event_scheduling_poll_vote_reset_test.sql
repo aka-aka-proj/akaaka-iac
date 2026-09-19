@@ -1,5 +1,5 @@
 BEGIN;
-SELECT plan(9);
+SELECT plan(10);
 
 SET LOCAL session_replication_role = replica;
 INSERT INTO auth.users (id,aud,role,email,raw_app_meta_data,raw_user_meta_data) VALUES
@@ -24,13 +24,17 @@ INSERT INTO public.event_scheduling_poll_voters(poll_id,profile_id) VALUES ('187
 
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000002","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000031','18700000-0000-4000-8000-000000000002');
+SELECT throws_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'42501',NULL,'eligible voter cannot reset votes');
 
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000003","role":"authenticated"}',true);
-SELECT throws_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'42501',NULL,'non-owner cannot reset votes');
+SELECT throws_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'42501',NULL,'outsider cannot reset votes');
 
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
 SELECT lives_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'owner resets votes');
-SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),0,'manual reset clears all votes');
+RESET ROLE;
+SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),0,'manual reset clears all votes independent of vote RLS');
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_options WHERE poll_id='18700000-0000-4000-8000-000000000021'),2,'manual reset preserves options');
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_voters WHERE poll_id='18700000-0000-4000-8000-000000000021'),1,'manual reset preserves voters');
 SELECT is((SELECT status FROM public.event_scheduling_polls WHERE id='18700000-0000-4000-8000-000000000021'),'open','manual reset keeps poll open');
