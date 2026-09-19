@@ -1,5 +1,5 @@
 BEGIN;
-SELECT plan(14);
+SELECT plan(16);
 
 -- Seed only fixtures as database owner; exercise every mutation with RLS enabled.
 SET LOCAL session_replication_role = replica;
@@ -27,9 +27,12 @@ INSERT INTO public.event_series_membership (id, series_id, event_id, position)
 VALUES ('b1170000-0000-4000-8000-000000000031', 'b1170000-0000-4000-8000-000000000011', 'b1170000-0000-4000-8000-000000000022', 1);
 SET LOCAL session_replication_role = origin;
 -- Isolate RLS from environment-dependent default table grants. Rolled back below.
-GRANT INSERT, UPDATE ON public.event_series_membership TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.event_series_membership TO authenticated;
 SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claims', '{"sub":"b1170000-0000-4000-8000-000000000001","role":"authenticated","aal":"aal1"}', true);
+
+SELECT is((SELECT count(*)::int FROM public.event_series_membership WHERE series_id='b1170000-0000-4000-8000-000000000011'),1,'owner can read own draft membership');
+SELECT is((SELECT count(*)::int FROM public.event_series_membership WHERE series_id='b1170000-0000-4000-8000-000000000013'),0,'owner cannot read another users draft membership');
 
 SELECT lives_ok($$INSERT INTO public.event_series_membership (series_id,event_id,position) VALUES ('b1170000-0000-4000-8000-000000000011','b1170000-0000-4000-8000-000000000021',2)$$,
  'owner can add own draft event without a recurring series_id');
