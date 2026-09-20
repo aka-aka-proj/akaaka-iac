@@ -1,5 +1,5 @@
 BEGIN;
-SELECT plan(19);
+SELECT plan(17);
 
 SET LOCAL session_replication_role = replica;
 INSERT INTO auth.users (id,aud,role,email,raw_app_meta_data,raw_user_meta_data) VALUES
