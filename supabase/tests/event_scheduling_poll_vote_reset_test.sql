@@ -44,6 +44,8 @@ SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE po
 -- Poll voting-configuration changes invalidate every existing vote atomically.
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_voters(poll_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000003');
+SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000002","role":"authenticated"}',true);
+INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000032','18700000-0000-4000-8000-000000000002');
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000003","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000031','18700000-0000-4000-8000-000000000003');
 RESET ROLE;
