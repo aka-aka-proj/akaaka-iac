@@ -25,10 +25,8 @@ INSERT INTO public.event_scheduling_poll_voters(poll_id,profile_id) VALUES ('187
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000002","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000031','18700000-0000-4000-8000-000000000002');
 SELECT throws_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'42501',NULL,'eligible voter cannot reset votes');
-
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000003","role":"authenticated"}',true);
 SELECT throws_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'42501',NULL,'outsider cannot reset votes');
-
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
 SELECT lives_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'owner resets votes');
 RESET ROLE;
@@ -39,23 +37,20 @@ SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_options WHERE 
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_voters WHERE poll_id='18700000-0000-4000-8000-000000000021'),1,'manual reset preserves voters');
 SELECT is((SELECT status FROM public.event_scheduling_polls WHERE id='18700000-0000-4000-8000-000000000021'),'open','manual reset keeps poll open');
 SELECT lives_ok($$SELECT public.reset_event_scheduling_poll_votes('18700000-0000-4000-8000-000000000021')$$,'reset is idempotent when already empty');
-
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000002","role":"authenticated"}',true);
 SELECT lives_ok($$INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000032','18700000-0000-4000-8000-000000000002')$$,'eligible voter can vote again after reset');
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),1,'re-vote is stored after reset');
 
 -- Poll voting-configuration changes invalidate every existing vote atomically.
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
--- Seed a vote on the unaffected option as well: the entire poll must reset.
-SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_voters(poll_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000003');
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000003","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000031','18700000-0000-4000-8000-000000000003');
 RESET ROLE;
-SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),2,'both changed and unchanged options have votes before alteration');
+SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),2,'changed and unchanged options both have votes before alteration');
 SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
-SELECT lives_ok($UPDATE public.event_scheduling_poll_options SET sort_order=5 WHERE id='18700000-0000-4000-8000-000000000032'$$,'owner can alter an open poll option');
+SELECT lives_ok($$UPDATE public.event_scheduling_poll_options SET sort_order=5 WHERE id='18700000-0000-4000-8000-000000000032'$$,'owner can alter an open poll option');
 RESET ROLE;
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),0,'altering a poll option clears all existing votes');
 
@@ -63,13 +58,11 @@ SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000002","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000031','18700000-0000-4000-8000-000000000002');
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),1,'fresh vote exists before voter-set alteration');
-
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000001","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_voters(poll_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000001');
 RESET ROLE;
 SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18700000-0000-4000-8000-000000000021'),0,'adding eligible voter clears all existing votes');
 
--- Removing one of two voters must also clear the other voter's ballots.
 SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claims','{"sub":"18700000-0000-4000-8000-000000000002","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18700000-0000-4000-8000-000000000021','18700000-0000-4000-8000-000000000031','18700000-0000-4000-8000-000000000002');
