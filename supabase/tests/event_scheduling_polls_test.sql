@@ -53,7 +53,7 @@ SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000002","role":"authenticated"}',true);
 INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000032','18400000-0000-4000-8000-000000000002');
 SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000001","role":"authenticated"}',true);
-SELECT lives_ok($SELECT public.finalize_event_scheduling_poll('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000032','18400000-0000-4000-8000-000000000034')$$,'owner finalizes atomically');
+SELECT lives_ok($$SELECT public.finalize_event_scheduling_poll('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000032','18400000-0000-4000-8000-000000000034')$$,'owner finalizes atomically');
 SELECT is((SELECT lifecycle_status FROM public.events WHERE id='18400000-0000-4000-8000-000000000011'),'draft','finalize does not publish');
 SELECT is((SELECT location_detail FROM public.events WHERE id='18400000-0000-4000-8000-000000000011'),'Taoyuan','finalize applies location');
 SELECT is((SELECT status FROM public.event_scheduling_polls WHERE id='18400000-0000-4000-8000-000000000021'),'closed','finalize closes poll');
