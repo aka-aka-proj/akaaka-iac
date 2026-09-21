@@ -12,19 +12,24 @@ AS $$
 DECLARE
   target_poll_id UUID;
 BEGIN
-  target_poll_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.poll_id ELSE NEW.poll_id END;
-
-  -- Do not interfere with ON DELETE CASCADE after the parent poll is gone.
-  IF NOT EXISTS (
-    SELECT 1 FROM public.event_scheduling_polls p WHERE p.id = target_poll_id
-  ) THEN
-    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  IF TG_OP = 'DELETE' THEN
+    target_poll_id := OLD.poll_id;
+  ELSE
+    target_poll_id := NEW.poll_id;
   END IF;
 
-  DELETE FROM public.event_scheduling_poll_votes v
-  WHERE v.poll_id = target_poll_id;
+  -- Do not interfere with ON DELETE CASCADE after the parent poll is gone.
+  IF EXISTS (
+    SELECT 1 FROM public.event_scheduling_polls p WHERE p.id = target_poll_id
+  ) THEN
+    DELETE FROM public.event_scheduling_poll_votes v
+    WHERE v.poll_id = target_poll_id;
+  END IF;
 
-  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
 END;
 $$;
 
