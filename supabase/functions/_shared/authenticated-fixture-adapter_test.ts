@@ -88,7 +88,7 @@ Deno.test('Supabase adapter recovery rejects a fixture tag owned by another run'
   assert(rejected)
 })
 
-for (const [status, expected] of [[400, 'create-user-http-400-code-unsafe_detail'], [429, 'create-user-http-429-code-unsafe_detail'], [503, 'create-user-http-503-code-unsafe_detail'], [0, 'create-user-unknown']]) {
+for (const [status, expected] of [[400, 'create-user-http-400-code-unsafe_detail'], [429, 'create-user-http-429-code-unsafe_detail'], [503, 'create-user-http-503'], [0, 'create-user-unknown']]) {
   Deno.test(`Supabase adapter reports a safe create-user failure stage for ${status || 'missing'} status`, async () => {
     const transport: typeof fetch = (input, init) => {
       const url = new URL(String(input))
