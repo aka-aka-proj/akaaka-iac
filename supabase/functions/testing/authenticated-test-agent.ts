@@ -82,8 +82,11 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
   }
 
   async function blocklistScenario(plan: FixturePlan, sessions: string[]) {
-    const [host, member, peer] = plan.users
+    const [host, member] = plan.users
     const [, memberToken] = sessions
+    const peer = { id: crypto.randomUUID(), email: `iac.patrol.test.${plan.runId}.peer@example.com`, password: `Aa1!${crypto.randomUUID()}` }
+    await adapter.provision(peer, plan.runId)
+    plan.users.push(peer)
     const eventId = plan.eventIds[0]
     let result = await admin.from('events').insert({
       id: eventId, creator_id: host.id, title: `Fixture ${plan.runId} blocklist`, event_type: 'workshop',
@@ -119,7 +122,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'blocklist-acknowledgement-success', 'blocklist-reverse-hidden']
   }
 
-  return {
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
@@ -160,9 +163,11 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     },
     async cleanData(plan) {
       const host = plan.users[0].id
-      const fixtureUserIds = plan.users.map((user) => user.id)
-      const blocks = await admin.from('blocks').delete().or(`blocker_id.in.(${fixtureUserIds.join(',')}),blocked_id.in.(${fixtureUserIds.join(',')})`)
-      requireValue(!blocks.error, 'cleanup-blocks')
+      if (plan.users.length > 2) {
+        const fixtureUserIds = plan.users.map((user) => user.id)
+        const blocks = await admin.from('blocks').delete().or(`blocker_id.in.(${fixtureUserIds.join(',')}),blocked_id.in.(${fixtureUserIds.join(',')})`)
+        requireValue(!blocks.error, 'cleanup-blocks')
+      }
       // Only known fixture IDs are removed. Unknown foreign-key dependencies fail closed.
       if (plan.seriesIds.length > 0) {
         const series = await admin.from('event_series').delete().in('id', plan.seriesIds).eq('creator_id', host)
@@ -218,6 +223,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       }
     },
   }
+  return adapter
 }
 
 async function main() {
