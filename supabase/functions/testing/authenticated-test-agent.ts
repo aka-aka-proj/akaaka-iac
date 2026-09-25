@@ -11,9 +11,12 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   const status = error && typeof error === 'object' && 'status' in error
     ? (error as { status?: unknown }).status
     : undefined
-  return typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 599
-    ? `${operation}-http-${status}`
-    : `${operation}-unknown`
+  if (!(typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 599)) {
+    return `${operation}-unknown`
+  }
+  const code = 'code' in (error as object) ? (error as { code?: unknown }).code : undefined
+  const safeCode = typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code) ? code : undefined
+  return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
 export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter {
