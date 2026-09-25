@@ -1,5 +1,5 @@
 BEGIN;
-SELECT plan(21);
+SELECT plan(22);
 
 SET LOCAL session_replication_role = replica;
 INSERT INTO auth.users (id,aud,role,email,raw_app_meta_data,raw_user_meta_data) VALUES
@@ -45,14 +45,21 @@ SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-00000000
 SELECT throws_ok($$INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000035','18400000-0000-4000-8000-000000000002')$$,'23503',NULL,'cross-poll option is rejected');
 
 SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000001","role":"authenticated"}',true);
-SELECT throws_ok($$DELETE FROM public.event_scheduling_poll_options WHERE id='18400000-0000-4000-8000-000000000031'$$,'23514',NULL,'option with votes cannot be deleted');
+SELECT lives_ok($$DELETE FROM public.event_scheduling_poll_options WHERE id='18400000-0000-4000-8000-000000000031'$$,'owner can remove an option and invalidate existing votes');
+RESET ROLE;
+SELECT is((SELECT count(*)::int FROM public.event_scheduling_poll_votes WHERE poll_id='18400000-0000-4000-8000-000000000021'),0,'removing an option clears all poll votes');
+SET LOCAL ROLE authenticated;
+-- Keep a real ballot on an unchanged option to exercise closed-poll immutability.
+SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000002","role":"authenticated"}',true);
+INSERT INTO public.event_scheduling_poll_votes(poll_id,option_id,profile_id) VALUES ('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000032','18400000-0000-4000-8000-000000000002');
+SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000001","role":"authenticated"}',true);
 SELECT lives_ok($$SELECT public.finalize_event_scheduling_poll('18400000-0000-4000-8000-000000000021','18400000-0000-4000-8000-000000000032','18400000-0000-4000-8000-000000000034')$$,'owner finalizes atomically');
 SELECT is((SELECT lifecycle_status FROM public.events WHERE id='18400000-0000-4000-8000-000000000011'),'draft','finalize does not publish');
 SELECT is((SELECT location_detail FROM public.events WHERE id='18400000-0000-4000-8000-000000000011'),'Taoyuan','finalize applies location');
 SELECT is((SELECT status FROM public.event_scheduling_polls WHERE id='18400000-0000-4000-8000-000000000021'),'closed','finalize closes poll');
 
 SELECT set_config('request.jwt.claims','{"sub":"18400000-0000-4000-8000-000000000002","role":"authenticated"}',true);
-SELECT throws_ok($$DELETE FROM public.event_scheduling_poll_votes WHERE poll_id='18400000-0000-4000-8000-000000000021' AND option_id='18400000-0000-4000-8000-000000000031' AND profile_id='18400000-0000-4000-8000-000000000002'$$,'P0001','poll is closed','closed poll is immutable');
+SELECT throws_ok($$DELETE FROM public.event_scheduling_poll_votes WHERE poll_id='18400000-0000-4000-8000-000000000021' AND option_id='18400000-0000-4000-8000-000000000032' AND profile_id='18400000-0000-4000-8000-000000000002'$$,'P0001','poll is closed','closed poll is immutable');
 
 RESET ROLE;
 INSERT INTO public.blocks(blocker_id,blocked_id) VALUES ('18400000-0000-4000-8000-000000000001','18400000-0000-4000-8000-000000000004');
