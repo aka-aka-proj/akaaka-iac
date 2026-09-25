@@ -73,4 +73,17 @@ assert_read_failure() {
 assert_read_failure check_runs_denied MOCK_CHECKS_EXIT
 assert_read_failure statuses_denied MOCK_STATUS_EXIT
 
+# Weekly release dry-run must fail closed when compare API cannot be read.
+WORKFLOW="$SCRIPT_DIR/../workflows/weekly-production-release.yml"
+if grep -Fq "compare/main...preview\" --jq '.ahead_by' 2>/dev/null || echo '?'" "$WORKFLOW"; then
+  echo "FAIL: weekly release dry-run masks compare API failures" >&2
+  exit 1
+fi
+compare_calls="$(grep -Fc 'compare/main...preview' "$WORKFLOW")"
+fail_closed_calls="$(grep -Fc 'unable to read main...preview comparison' "$WORKFLOW")"
+if [ "$compare_calls" -lt 2 ] || [ "$fail_closed_calls" -lt 2 ]; then
+  echo "FAIL: both IaC and frontend dry-run compare paths must fail closed" >&2
+  exit 1
+fi
+
 echo "release-check-status tests passed"
