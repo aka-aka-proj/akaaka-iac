@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { parseBlocklistAcknowledgment, blocklistConflictResponse } from '../_shared/blocklist-conflict.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -51,8 +52,16 @@ Deno.serve(async (req: Request) => {
     if (authError || !user) return errorResponse('unauthorized', 'Invalid or expired token', 401)
 
     const body = await req.json() as {
+      expected_event_ids?: unknown
+      acknowledge_blocklist_conflict?: unknown
       series_id?: string
       form_responses?: Record<string, unknown>
+    }
+    const acknowledge = parseBlocklistAcknowledgment(body.acknowledge_blocklist_conflict)
+    if (acknowledge === null) return errorResponse('validation_error', 'acknowledge_blocklist_conflict must be boolean', 400)
+    const submittedEventIds = body.expected_event_ids
+    if ((submittedEventIds !== undefined && (!Array.isArray(submittedEventIds) || !submittedEventIds.every(id => typeof id === 'string'))) || (acknowledge && !Array.isArray(submittedEventIds))) {
+      return errorResponse('validation_error', 'Whole-series confirmation requires the original expected_event_ids', 400)
     }
     const seriesId = body.series_id
     if (!seriesId) return errorResponse('validation_error', 'series_id is required', 400)
@@ -126,7 +135,7 @@ Deno.serve(async (req: Request) => {
       if (event.external_registration_url) {
         return errorResponse('external_registration', 'One or more events use external registration', 400)
       }
-      if (event.lifecycle_status === 'cancelled' || event.publication_status === 'closed') {
+      if (!['published', 'registration_open'].includes(event.lifecycle_status) || event.publication_status !== 'published') {
         return errorResponse('event_closed', `Event ${event.id} is not open for registration`, 400)
       }
       if (event.registration_deadline && new Date(event.registration_deadline) < new Date()) {
@@ -194,27 +203,23 @@ Deno.serve(async (req: Request) => {
     }
 
     // 6. Block check (bidirectional against the series creator)
-    const { data: blocks } = await serviceClient
+    const { data: blocks, error: blocksError } = await serviceClient
       .from('blocks')
       .select('blocker_id, blocked_id')
       .or(`and(blocker_id.eq.${user.id},blocked_id.eq.${series.creator_id}),and(blocker_id.eq.${series.creator_id},blocked_id.eq.${user.id})`)
 
-    if (blocks && blocks.length > 0) {
-      const block = blocks[0]
-      const message = block.blocker_id === user.id
-        ? 'You have blocked this series host.'
-        : 'This series host has blocked you.'
-      return errorResponse('blocked', message, 403)
-    }
+    if (blocksError) return errorResponse('internal_error', 'Unable to verify registration eligibility', 500)
+    if (blocks && blocks.length > 0) return errorResponse('blocked', 'Registration is unavailable.', 403)
 
     // Recheck capacity and perform every write under one database transaction.
     const { data: rawAtomicRegistration, error: atomicError } = await serviceClient.rpc(
-      'register_event_series_atomic',
+      'register_event_series_checked',
       {
+        p_acknowledge_blocklist_conflict: acknowledge,
         p_series_id: seriesId,
         p_profile_id: user.id,
         p_form_responses: body.form_responses ?? {},
-        p_expected_event_ids: expectedEventIds,
+        p_expected_event_ids: submittedEventIds ?? expectedEventIds,
       },
     ).single()
     const atomicRegistration = rawAtomicRegistration as unknown as {
@@ -222,6 +227,9 @@ Deno.serve(async (req: Request) => {
       event_registration_count: number
     } | null
     if (atomicError || !atomicRegistration) {
+      const conflict = blocklistConflictResponse(atomicError, events)
+      if (conflict) return jsonResponse({ error: { ...conflict.error, details: { ...conflict.error.details, expected_event_ids: expectedEventIds } } }, 409)
+      if (atomicError?.message === 'registration_blocked') return errorResponse('blocked', 'Registration is unavailable.', 403)
       console.error('Failed to atomically register for series:', atomicError)
       const isRetryableRace = atomicError?.message?.includes('capacity') || atomicError?.message?.includes('membership changed')
       return errorResponse(
