@@ -23,7 +23,7 @@ export function makeFixturePlan(): FixturePlan {
   const runId = crypto.randomUUID()
   return {
     runId,
-    users: ['host', 'member'].map((role) => ({
+    users: ['host', 'member', 'peer'].map((role) => ({
       id: crypto.randomUUID(),
       email: `iac.patrol.test.${runId}.${role}@example.com`,
       password: `Aa1!${crypto.randomUUID()}`,
