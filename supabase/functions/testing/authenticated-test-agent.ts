@@ -253,7 +253,7 @@ async function main() {
     return
   }
   const adapter = createAdapter(url, serviceKey, anonKey)
-  if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario!
+  if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
   const result = await runFixture(url, adapter,
     (runId) => console.log(JSON.stringify({ runId, stage: 'started' })))
   console.log(JSON.stringify({ ...result, project: 'xdknuxdhyvjgwlcliyqx', role: 'authenticated', aal: 'aal1' }))
