@@ -12,7 +12,6 @@ export interface FixtureAdapter {
   provision(user: FixtureUser, runId: string): Promise<void>
   login(user: FixtureUser): Promise<string>
   scenario(plan: FixturePlan, sessions: string[]): Promise<string[]>
-  blocklistScenario?(plan: FixturePlan, sessions: string[]): Promise<string[]>
   owner(id: string): Promise<string | null>
   revoke(session: string): Promise<void>
   cleanData(plan: FixturePlan): Promise<void>
@@ -24,7 +23,7 @@ export function makeFixturePlan(): FixturePlan {
   const runId = crypto.randomUUID()
   return {
     runId,
-    users: ['host', 'member', 'peer'].map((role) => ({
+    users: ['host', 'member'].map((role) => ({
       id: crypto.randomUUID(),
       email: `iac.patrol.test.${runId}.${role}@example.com`,
       password: `Aa1!${crypto.randomUUID()}`,
