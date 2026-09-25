@@ -43,7 +43,7 @@ Deno.test('fixture plans use unique run, identities and cryptographic passwords'
   const a = makeFixturePlan(), b = makeFixturePlan()
   assert(a.runId !== b.runId)
   assert(new Set([...a.users, ...b.users].map((u) => u.password)).size === 4)
-  assert(a.users.every((u) => u.password.length >= 32 && u.email.includes(a.runId)))
+  assert(a.users.every((u) => u.password.length >= 32 && u.password.length <= 72 && u.email.includes(a.runId)))
 })
 
 Deno.test('wrong project fails before any provisioning', async () => {
