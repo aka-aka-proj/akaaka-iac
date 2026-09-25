@@ -11,6 +11,7 @@ on:
         options:
           - list
           - verify-series-notification
+          - verify-blocklist-conflict
           - cleanup-run
       run_id:
         description: 'UUID run identity required only for cleanup-run'
