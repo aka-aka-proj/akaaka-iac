@@ -26,7 +26,7 @@ export function makeFixturePlan(): FixturePlan {
     users: ['host', 'member'].map((role) => ({
       id: crypto.randomUUID(),
       email: `iac.patrol.test.${runId}.${role}@example.com`,
-      password: `Aa1!${crypto.randomUUID()}${crypto.randomUUID()}`,
+      password: `Aa1!${crypto.randomUUID()}`,
     })),
     eventIds: Array.from({ length: 4 }, () => crypto.randomUUID()),
     seriesIds: [crypto.randomUUID(), crypto.randomUUID()],
