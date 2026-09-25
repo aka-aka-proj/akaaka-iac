@@ -95,7 +95,7 @@ for (const [status, expected] of [[400, 'create-user-http-400-code-unsafe_detail
       if (url.pathname === '/auth/v1/admin/users' && init?.method === 'POST') {
         if (status === 0) return Promise.reject(new Error('password=TOP_SECRET'))
         const responseStatus = Number(status) || 500
-        return Promise.resolve(new Response(JSON.stringify({ message: 'password=TOP_SECRET', code: 'unsafe_detail' }), {
+        return Promise.resolve(new Response(JSON.stringify({ message: 'password=TOP_SECRET', error_code: 'unsafe_detail' }), {
           status: responseStatus, headers: { 'Content-Type': 'application/json' },
         }))
       }
