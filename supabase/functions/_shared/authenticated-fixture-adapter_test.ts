@@ -116,7 +116,9 @@ for (const [status, expected] of [[400, 'create-user-http-400-code-unsafe_detail
 
 Deno.test('authenticated fixture exposes a dedicated blocklist-conflict hosted scenario', async () => {
   const source = await Deno.readTextFile(new URL('../testing/authenticated-test-agent.ts', import.meta.url))
+  const workflow = await Deno.readTextFile(new URL('../../../.github/workflows/auth-test-agent.yml', import.meta.url))
   assert(source.includes("command === 'verify-blocklist-conflict'"), 'agent must accept verify-blocklist-conflict')
+  assert(workflow.includes('verify-blocklist-conflict'), 'workflow must expose verify-blocklist-conflict')
   assert(source.includes("'blocklist-outgoing-conflict-409'"), 'scenario must prove outgoing conflict returns 409')
   assert(source.includes("'blocklist-reverse-hidden'"), 'scenario must prove reverse direction does not leak a warning')
   assert(source.includes("'blocklist-acknowledgement-success'"), 'scenario must prove explicit acknowledgement succeeds')
