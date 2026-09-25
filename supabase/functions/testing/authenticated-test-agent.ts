@@ -160,6 +160,9 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     },
     async cleanData(plan) {
       const host = plan.users[0].id
+      const fixtureUserIds = plan.users.map((user) => user.id)
+      const blocks = await admin.from('blocks').delete().or(`blocker_id.in.(${fixtureUserIds.join(',')}),blocked_id.in.(${fixtureUserIds.join(',')})`)
+      requireValue(!blocks.error, 'cleanup-blocks')
       // Only known fixture IDs are removed. Unknown foreign-key dependencies fail closed.
       if (plan.seriesIds.length > 0) {
         const series = await admin.from('event_series').delete().in('id', plan.seriesIds).eq('creator_id', host)
