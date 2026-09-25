@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { parseBlocklistAcknowledgment, blocklistConflictResponse } from '../_shared/blocklist-conflict.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -40,7 +41,9 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'unauthorized', message: 'Invalid or expired token' }, 401)
     }
 
-    const body = (await req.json()) as { event_id?: string; form_responses?: Record<string, unknown> }
+    const body = (await req.json()) as { event_id?: string; form_responses?: Record<string, unknown>; acknowledge_blocklist_conflict?: unknown }
+    const acknowledge = parseBlocklistAcknowledgment(body.acknowledge_blocklist_conflict)
+    if (acknowledge === null) return jsonResponse({ error: 'invalid', message: 'acknowledge_blocklist_conflict must be boolean' }, 400)
     const eventId = body.event_id
     const formResponses = body.form_responses
 
@@ -51,14 +54,18 @@ Deno.serve(async (req: Request) => {
     const serviceClient = createClient(supabaseUrl, serviceRoleKey)
 
     // 1. Fetch event
-    const { data: event, error: eventError } = await serviceClient
+    const { data: event, error: eventError } = await userClient
       .from('events')
-      .select('id, creator_id, max_capacity, registration_deadline, external_registration_url')
+      .select('id, creator_id, max_capacity, registration_deadline, external_registration_url, lifecycle_status, publication_status, registration_form_config')
       .eq('id', eventId)
       .single()
 
     if (eventError || !event) {
       return jsonResponse({ error: 'not_found', message: 'Event not found' }, 404)
+    }
+
+    if (!['published', 'registration_open'].includes(event.lifecycle_status) || event.publication_status !== 'published') {
+      return jsonResponse({ error: 'registration_closed', message: 'Event is not accepting registrations' }, 400)
     }
 
     if (event.external_registration_url) {
@@ -76,18 +83,13 @@ Deno.serve(async (req: Request) => {
     }
 
     // 4. Block check (bidirectional)
-    const { data: blocks } = await serviceClient
+    const { data: blocks, error: blocksError } = await serviceClient
       .from('blocks')
       .select('blocker_id, blocked_id')
       .or(`and(blocker_id.eq.${user.id},blocked_id.eq.${event.creator_id}),and(blocker_id.eq.${event.creator_id},blocked_id.eq.${user.id})`)
 
-    if (blocks && blocks.length > 0) {
-      const block = blocks[0]
-      const message = block.blocker_id === user.id 
-        ? 'You have blocked this event host.' 
-        : 'This event host has blocked you.'
-      return jsonResponse({ error: 'blocked', message }, 403)
-    }
+    if (blocksError) return jsonResponse({ error: 'db_error', message: 'Unable to verify registration eligibility' }, 500)
+    if (blocks && blocks.length > 0) return jsonResponse({ error: 'blocked', message: 'Registration is unavailable.' }, 403)
 
     // 5. Check existing active registration
     const { data: existing } = await serviceClient
@@ -103,35 +105,23 @@ Deno.serve(async (req: Request) => {
     }
 
     // 5b. Validate form responses if event has a form config
-    if (formResponses) {
-      const { data: eventFormConfig } = await serviceClient
-        .from('events')
-        .select('registration_form_config')
-        .eq('id', eventId)
-        .single()
-
-      if (eventFormConfig?.registration_form_config) {
-        const config = eventFormConfig.registration_form_config as Array<{ id: string; required?: boolean; type: string; options?: string[] }>
-        for (const field of config) {
-          if (field.required) {
-            const val = formResponses[field.id]
-            if (val === undefined || val === null || val === '' || val === false) {
-              return jsonResponse({ error: 'form_validation_error', message: `Required field '${field.id}' is missing` }, 400)
-            }
-          }
-          if (field.type === 'select' && field.options && formResponses[field.id]) {
-            if (!field.options.includes(formResponses[field.id] as string)) {
-              return jsonResponse({ error: 'form_validation_error', message: `Invalid value for field '${field.id}'` }, 400)
-            }
-          }
-        }
+    const config = Array.isArray(event.registration_form_config)
+      ? event.registration_form_config as Array<{ id: string; required?: boolean; type: string; options?: string[] }>
+      : []
+    for (const field of config) {
+      const value = formResponses?.[field.id]
+      if (field.required && (value === undefined || value === null || value === '' || value === false)) {
+        return jsonResponse({ error: 'form_validation_error', message: `Required field '${field.id}' is missing` }, 400)
+      }
+      if (field.type === 'select' && field.options && value && !field.options.includes(value as string)) {
+        return jsonResponse({ error: 'form_validation_error', message: `Invalid value for field '${field.id}'` }, 400)
       }
     }
 
     // 6. Recheck capacity and insert under the same event-row lock used by
     // series registration. The earlier capacity read is UX-only.
     const { data: rawReg, error: regError } = await serviceClient
-      .rpc('create_event_registration_atomic', { p_event_id: eventId, p_profile_id: user.id })
+      .rpc('create_event_registration_checked', { p_event_id: eventId, p_profile_id: user.id, p_acknowledge_blocklist_conflict: acknowledge })
       .single()
     const rpcReg = rawReg as unknown as {
       registration_id: string
@@ -149,6 +139,9 @@ Deno.serve(async (req: Request) => {
     } : null
 
     if (regError || !reg) {
+      const conflict = blocklistConflictResponse(regError, [event])
+      if (conflict) return jsonResponse(conflict, 409)
+      if (regError?.message === 'registration_blocked') return jsonResponse({ error: 'blocked', message: 'Registration is unavailable.' }, 403)
       const message = regError?.message ?? 'Failed to create registration'
       if (message.includes('already registered')) {
         return jsonResponse({ error: 'already_registered', message: 'You already have an active registration for this event' }, 400)
