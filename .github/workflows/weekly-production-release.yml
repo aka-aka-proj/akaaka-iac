@@ -397,7 +397,11 @@ jobs:
           }
 
           if [ "$RELEASE_MODE" = "dry-run" ]; then
-            ahead_dr="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by' 2>/dev/null || echo '?')"
+            if ! ahead_dr="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')"; then
+              result="failed"; class="pre-merge-skipped"
+              detail="dry-run: unable to read main...preview comparison; refusing to report a successful plan from incomplete GitHub state"
+              exit 0
+            fi
             existing_dr="$(gh pr list -R "$REPO" --base main --head preview --state open --limit 1 --json number --jq '.[0].number // ""' 2>/dev/null || true)"
             result="dry-run"; class=""
             detail="dry-run: preview ahead_by=${ahead_dr}; open PR=${existing_dr:-none}; no mutations performed"
@@ -820,7 +824,11 @@ jobs:
           }
 
           if [ "$RELEASE_MODE" = "dry-run" ]; then
-            ahead_dr="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by' 2>/dev/null || echo '?')"
+            if ! ahead_dr="$(gh api "repos/$REPO/compare/main...preview" --jq '.ahead_by')"; then
+              result="failed"; class="pre-merge-skipped"
+              detail="dry-run: unable to read main...preview comparison; refusing to report a successful plan from incomplete GitHub state"
+              exit 0
+            fi
             existing_dr="$(gh pr list -R "$REPO" --base main --head preview --state open --limit 1 --json number --jq '.[0].number // ""' 2>/dev/null || true)"
             result="dry-run"; class=""
             detail="dry-run: preview ahead_by=${ahead_dr}; open PR=${existing_dr:-none}; no mutations performed"
