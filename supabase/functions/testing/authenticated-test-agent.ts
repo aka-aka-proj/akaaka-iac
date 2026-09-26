@@ -248,7 +248,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'share-token-anon-invalid-hidden', 'share-token-hygiene-clears-off-private']
   }
 
-  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
