@@ -12,6 +12,7 @@ on:
           - list
           - verify-series-notification
           - verify-blocklist-conflict
+          - verify-recurrence-behavior
           - cleanup-run
       run_id:
         description: 'UUID run identity required only for cleanup-run'
