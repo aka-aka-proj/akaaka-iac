@@ -19,7 +19,7 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
-export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter {
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
   const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
