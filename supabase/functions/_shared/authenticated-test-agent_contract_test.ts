@@ -36,3 +36,12 @@ Deno.test('hosted share-token scenario covers issue 102 behavior matrix', () => 
     if (!source.includes(marker)) throw new Error(`missing hosted share-token evidence marker: ${marker}`)
   }
 })
+
+Deno.test('hosted blocklist series scenario covers atomic conflict and stale snapshot', () => {
+  for (const marker of [
+    'blocklist-series-conflict-all-or-nothing',
+    'blocklist-series-stale-snapshot-fail-closed',
+  ]) {
+    if (!source.includes(marker)) throw new Error(`missing hosted blocklist series evidence marker: ${marker}`)
+  }
+})
