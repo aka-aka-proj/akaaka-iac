@@ -117,5 +117,21 @@ SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub','19100000-0000-4000-8000-000000000002',true);
 SELECT is((SELECT count(*)::int FROM public.blocks),1,'management list only reads caller outgoing blocks');
 WITH removed AS (DELETE FROM public.blocks WHERE blocker_id='19100000-0000-4000-8000-000000000003' RETURNING 1) SELECT is((SELECT count(*)::int FROM removed),0,'management cannot unblock for another user');
+RESET ROLE;
+UPDATE public.events SET visibility_settings='{"type":"private"}' WHERE id='19100000-0000-4000-8000-000000000012';
+SET session_replication_role = replica;
+UPDATE public.event_registrations SET status='approved' WHERE event_id='19100000-0000-4000-8000-000000000012' AND profile_id='19100000-0000-4000-8000-000000000003';
+SET session_replication_role = origin;
+SET LOCAL ROLE authenticated;
+SELECT throws_ok($$INSERT INTO public.event_registrations(event_id,profile_id,status) VALUES ('19100000-0000-4000-8000-000000000012','19100000-0000-4000-8000-000000000002','pending')$$,
+ 'P0001','forbidden','inaccessible event cannot disclose peer conflicts through direct insert');
+RESET ROLE;
+UPDATE public.events SET visibility_settings=$json${"type":"public"}$json$ WHERE id=$id$19100000-0000-4000-8000-000000000012$id$;
+SET LOCAL ROLE authenticated;
+SELECT throws_ok($$INSERT INTO public.event_registrations(event_id,profile_id,status) VALUES ($id$19100000-0000-4000-8000-000000000012$id$,$id$19100000-0000-4000-8000-000000000002$id$,$s$pending$s$)$$,
+ $s$P0001$s$,$s$blocklist_confirmation_required$s$,$s$visible self registration still receives conflict warning$s$);
+SELECT throws_ok($$INSERT INTO public.event_registrations(event_id,profile_id,status) VALUES ($id$19100000-0000-4000-8000-000000000012$id$,$id$19100000-0000-4000-8000-000000000005$id$,$s$pending$s$)$$,
+ $s$P0001$s$,$s$forbidden$s$,$s$another profile cannot be used to probe conflict information$s$);
+RESET ROLE;
 SELECT * FROM finish();
 ROLLBACK;
