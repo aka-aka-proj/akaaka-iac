@@ -14,3 +14,13 @@ Deno.test('hosted blocklist scenario covers status and acknowledgement scope mat
     if (!source.includes(marker)) throw new Error(`missing hosted evidence marker: ${marker}`)
   }
 })
+
+Deno.test('hosted recurrence scenario covers issue 103 staging behavior matrix', () => {
+  for (const marker of [
+    'recurrence-offset-instance-deadline',
+    'recurrence-legacy-absolute-deadline',
+    'recurrence-scheduling-lock-rejected',
+  ]) {
+    if (!source.includes(marker)) throw new Error(`missing hosted recurrence evidence marker: ${marker}`)
+  }
+})
