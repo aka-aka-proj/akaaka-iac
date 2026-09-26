@@ -10,3 +10,11 @@
 - Edge helper 的 boolean consent 與授權 contact metadata：先得到 missing module Red，實作後 2 tests Green；三個 Edge Function 的 Deno check 通過。
 
 以上是本地 SQL／helper 驗證，並不代表 hosted deployment、真實登入瀏覽器或 production release 已驗證。後續以 PR CI、preview deployment 與 issue 驗收紀錄為準。
+
+## 直接 Data API 授權補丁（2026-09-26）
+
+- 在原 migration 的本地資料庫追加不可見活動 INSERT 測試，先得到 Red：41 assertions 中 1 failed，實際 `blocklist_confirmation_required`、預期 `forbidden`。
+- 加入先執行的 SECURITY INVOKER 授權 trigger 後 Green；補上可見本人報名仍有提醒及不可假冒其他 profile 的回歸，43 assertions 通過。全套 31 files / 520 assertions 通過。
+- 確認原 PR #195 已合併後，將補丁移至由最新 origin/preview 建立的獨立 worktree 與新 migration `20260926005806_authorize_blocklist_conflict_lookup.sql`；不改寫已部署 migration。規格：docs PR #219。
+
+- docs#219 審查追加 eligibility 要求：可見活動的直接 INSERT 仍可在 duplicate 等 constraint 之前探測，先將直接呼叫預期改為 forbidden 取得 Red（1/43 failed）。改為拒絕 anon/authenticated 直接 INSERT 及 pending → approved，統一經完整資格驗證 endpoint；Green 43 assertions、全庫 520 assertions 通過。
