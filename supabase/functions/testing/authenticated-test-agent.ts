@@ -88,7 +88,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     const legacyParent = plan.eventIds[1]
     const base = new Date(Date.now() + 21 * 86400000)
     const legacyDeadline = new Date(base.getTime() - 3 * 86400000).toISOString()
-    let result = await admin.from('events').insert([
+    const result = await admin.from('events').insert([
       {
         id: offsetParent, creator_id: host.id, title: `Fixture ${plan.runId} recurrence offset`, event_type: 'workshop',
         start_time: base.toISOString(), registration_deadline: legacyDeadline, lifecycle_status: 'draft',
