@@ -24,3 +24,15 @@ Deno.test('hosted recurrence scenario covers issue 103 staging behavior matrix',
     if (!source.includes(marker)) throw new Error(`missing hosted recurrence evidence marker: ${marker}`)
   }
 })
+
+Deno.test('hosted share-token scenario covers issue 102 behavior matrix', () => {
+  for (const marker of [
+    'share-token-owner-ensure',
+    'share-token-owner-rotate-invalidates-old',
+    'share-token-anon-valid-read',
+    'share-token-anon-invalid-hidden',
+    'share-token-hygiene-clears-off-private',
+  ]) {
+    if (!source.includes(marker)) throw new Error(`missing hosted share-token evidence marker: ${marker}`)
+  }
+})

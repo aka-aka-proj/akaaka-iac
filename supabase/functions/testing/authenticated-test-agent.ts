@@ -19,7 +19,7 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
-export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
   const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
@@ -213,7 +213,42 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden']
   }
 
-  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
+  async function shareTokenScenario(plan: FixturePlan, sessions: string[]) {
+    const [host] = plan.users
+    const [hostToken] = sessions
+    const eventId = plan.eventIds[0]
+    let result = await admin.from('events').insert({
+      id: eventId, creator_id: host.id, title: `Fixture ${plan.runId} share token`, event_type: 'workshop',
+      start_time: new Date(Date.now() + 7 * 86400000).toISOString(), lifecycle_status: 'registration_open',
+      publication_status: 'published', visibility_settings: { type: 'private' }, max_capacity: 10,
+    })
+    requireValue(!result.error, 'share-token-seed-event')
+
+    const owner = client(hostToken)
+    const ensured = await owner.rpc('ensure_event_share_token', { p_event_id: eventId })
+    requireValue(!ensured.error && typeof ensured.data === 'string' && ensured.data.length === 48, 'share-token-owner-ensure')
+    const first = ensured.data
+
+    const anon = createClient(url, anonKey, { ...options, global: { fetch: boundedFetch } })
+    const visible = await anon.rpc('get_event_by_share_token', { p_token: first })
+    requireValue(!visible.error && visible.data?.length === 1 && visible.data[0]?.id === eventId, 'share-token-anon-valid-read')
+    const hidden = await anon.rpc('get_event_by_share_token', { p_token: '0'.repeat(48) })
+    requireValue(!hidden.error && hidden.data?.length === 0, 'share-token-anon-invalid-hidden')
+
+    const rotated = await owner.rpc('rotate_event_share_token', { p_event_id: eventId })
+    requireValue(!rotated.error && typeof rotated.data === 'string' && rotated.data.length === 48 && rotated.data !== first, 'share-token-owner-rotate')
+    const old = await anon.rpc('get_event_by_share_token', { p_token: first })
+    requireValue(!old.error && old.data?.length === 0, 'share-token-owner-rotate-invalidates-old')
+
+    result = await admin.from('events').update({ visibility_settings: { type: 'public' } }).eq('id', eventId)
+    requireValue(!result.error, 'share-token-hygiene-update')
+    const stale = await anon.rpc('get_event_by_share_token', { p_token: rotated.data })
+    requireValue(!stale.error && stale.data?.length === 0, 'share-token-hygiene-clears-off-private')
+    return ['share-token-owner-ensure', 'share-token-owner-rotate-invalidates-old', 'share-token-anon-valid-read',
+      'share-token-anon-invalid-hidden', 'share-token-hygiene-clears-off-private']
+  }
+
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
@@ -243,6 +278,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     scenario,
     blocklistScenario,
     recurrenceScenario,
+    shareTokenScenario,
     async owner(id) {
       const result = await admin.auth.admin.getUserById(id)
       if (result.error?.status === 404) return null
@@ -320,7 +356,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
 
 async function main() {
   const command = Deno.args[0]
-  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'verify-recurrence-behavior' || command === 'cleanup-run', 'command')
+  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'verify-recurrence-behavior' || command === 'verify-share-token' || command === 'cleanup-run', 'command')
   const url = Deno.env.get('SUPABASE_URL')
   requireValue(url === STAGING_URL, 'environment')
   const serviceKey = Deno.env.get('SERVICE_ROLE_KEY')
@@ -347,6 +383,7 @@ async function main() {
   const adapter = createAdapter(url, serviceKey, anonKey)
   if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
   if (command === 'verify-recurrence-behavior') adapter.scenario = adapter.recurrenceScenario
+  if (command === 'verify-share-token') adapter.scenario = adapter.shareTokenScenario
   const result = await runFixture(url, adapter,
     (runId) => console.log(JSON.stringify({ runId, stage: 'started' })))
   console.log(JSON.stringify({ ...result, project: 'xdknuxdhyvjgwlcliyqx', role: 'authenticated', aal: 'aal1' }))
