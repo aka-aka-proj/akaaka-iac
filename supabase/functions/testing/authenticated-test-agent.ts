@@ -19,7 +19,7 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
-export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
   const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
@@ -79,6 +79,57 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     await notifications(memberToken, transitionId, 0)
     return ['authenticated-series-registration', 'host-notification-once', 'nonrecipient-denied',
       'duplicate-registration-denied', 'service-fixture-pending-silent', 'service-fixture-approval-once']
+  }
+
+  async function recurrenceScenario(plan: FixturePlan, sessions: string[]) {
+    const [host] = plan.users
+    const [hostToken] = sessions
+    const offsetParent = plan.eventIds[0]
+    const legacyParent = plan.eventIds[1]
+    const base = new Date(Date.now() + 21 * 86400000)
+    const legacyDeadline = new Date(base.getTime() - 3 * 86400000).toISOString()
+    const result = await admin.from('events').insert([
+      {
+        id: offsetParent, creator_id: host.id, title: `Fixture ${plan.runId} recurrence offset`, event_type: 'workshop',
+        start_time: base.toISOString(), registration_deadline: legacyDeadline, lifecycle_status: 'draft',
+        publication_status: 'closed', visibility_settings: { type: 'public' }, max_capacity: 10,
+      },
+      {
+        id: legacyParent, creator_id: host.id, title: `Fixture ${plan.runId} recurrence legacy`, event_type: 'workshop',
+        start_time: base.toISOString(), registration_deadline: legacyDeadline, lifecycle_status: 'draft',
+        publication_status: 'closed', visibility_settings: { type: 'public' }, max_capacity: 10,
+      },
+    ])
+    requireValue(!result.error, 'recurrence-seed-parents')
+
+    const offsetRule = { frequency: 'weekly', interval: 1, days: [base.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' })], count: 2,
+      timezone: 'UTC', registration_deadline_offset_minutes: 1440 }
+    const offset = await client(hostToken).functions.invoke('create-recurring-events', {
+      body: { parent_event_id: offsetParent, recurrence_rule: offsetRule, start_time: base.toISOString() },
+    })
+    requireValue(!offset.error && offset.data?.success === true && offset.data?.created_instance_count === 1, 'recurrence-offset-create')
+    const offsetChildId = offset.data.instance_ids?.[1]
+    requireValue(typeof offsetChildId === 'string', 'recurrence-offset-child')
+    const offsetChild = await admin.from('events').select('start_time,registration_deadline').eq('id', offsetChildId).single()
+    requireValue(!offsetChild.error && offsetChild.data?.registration_deadline &&
+      new Date(offsetChild.data.start_time).getTime() - new Date(offsetChild.data.registration_deadline).getTime() === 1440 * 60000,
+      'recurrence-offset-instance-deadline')
+    plan.eventIds.push(offsetChildId)
+
+    const legacyRule = { frequency: 'weekly', interval: 1, days: [base.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' })], count: 2, timezone: 'UTC' }
+    const legacy = await client(hostToken).functions.invoke('create-recurring-events', {
+      body: { parent_event_id: legacyParent, recurrence_rule: legacyRule, start_time: base.toISOString() },
+    })
+    requireValue(!legacy.error && legacy.data?.success === true && legacy.data?.created_instance_count === 1, 'recurrence-legacy-create')
+    const legacyChildId = legacy.data.instance_ids?.[1]
+    requireValue(typeof legacyChildId === 'string', 'recurrence-legacy-child')
+    const legacyChild = await admin.from('events').select('registration_deadline').eq('id', legacyChildId).single()
+    requireValue(!legacyChild.error && legacyChild.data?.registration_deadline === legacyDeadline, 'recurrence-legacy-absolute-deadline')
+    plan.eventIds.push(legacyChildId)
+
+    const locked = await admin.from('events').update({ start_time: new Date(base.getTime() + 8 * 86400000).toISOString() }).eq('id', offsetChildId)
+    requireValue(!!locked.error, 'recurrence-scheduling-lock-rejected')
+    return ['recurrence-offset-instance-deadline', 'recurrence-legacy-absolute-deadline', 'recurrence-scheduling-lock-rejected']
   }
 
   async function blocklistScenario(plan: FixturePlan, sessions: string[]) {
@@ -162,7 +213,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden']
   }
 
-  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
@@ -191,6 +242,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     },
     scenario,
     blocklistScenario,
+    recurrenceScenario,
     async owner(id) {
       const result = await admin.auth.admin.getUserById(id)
       if (result.error?.status === 404) return null
@@ -268,7 +320,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
 
 async function main() {
   const command = Deno.args[0]
-  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'cleanup-run', 'command')
+  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'verify-recurrence-behavior' || command === 'cleanup-run', 'command')
   const url = Deno.env.get('SUPABASE_URL')
   requireValue(url === STAGING_URL, 'environment')
   const serviceKey = Deno.env.get('SERVICE_ROLE_KEY')
@@ -294,6 +346,7 @@ async function main() {
   }
   const adapter = createAdapter(url, serviceKey, anonKey)
   if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
+  if (command === 'verify-recurrence-behavior') adapter.scenario = adapter.recurrenceScenario
   const result = await runFixture(url, adapter,
     (runId) => console.log(JSON.stringify({ runId, stage: 'started' })))
   console.log(JSON.stringify({ ...result, project: 'xdknuxdhyvjgwlcliyqx', role: 'authenticated', aal: 'aal1' }))
