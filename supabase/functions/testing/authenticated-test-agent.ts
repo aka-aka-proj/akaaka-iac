@@ -19,7 +19,7 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
-export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter {
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
   const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
@@ -81,7 +81,48 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'duplicate-registration-denied', 'service-fixture-pending-silent', 'service-fixture-approval-once']
   }
 
-  return {
+  async function blocklistScenario(plan: FixturePlan, sessions: string[]) {
+    const [host, member] = plan.users
+    const [, memberToken] = sessions
+    const peer = { id: crypto.randomUUID(), email: `iac.patrol.test.${plan.runId}.peer@example.com`, password: `Aa1!${crypto.randomUUID()}` }
+    await adapter.provision(peer, plan.runId)
+    plan.users.push(peer)
+    const eventId = plan.eventIds[0]
+    let result = await admin.from('events').insert({
+      id: eventId, creator_id: host.id, title: `Fixture ${plan.runId} blocklist`, event_type: 'workshop',
+      start_time: new Date(Date.now() + 7 * 86400000).toISOString(), lifecycle_status: 'registration_open',
+      publication_status: 'published', visibility_settings: { type: 'public' }, max_capacity: 10,
+    })
+    requireValue(!result.error, 'blocklist-seed-event')
+    result = await admin.from('event_registrations').insert({ event_id: eventId, profile_id: peer.id, status: 'approved' })
+    requireValue(!result.error, 'blocklist-seed-peer')
+    result = await admin.from('blocks').insert({ blocker_id: member.id, blocked_id: peer.id })
+    requireValue(!result.error, 'blocklist-seed-outgoing')
+
+    const warning = await client(memberToken).functions.invoke('create-registration', { body: { event_id: eventId } })
+    requireValue(warning.error?.context instanceof Response && warning.error.context.status === 409, 'blocklist-outgoing-conflict-409')
+    const warningBody = await warning.error.context.json()
+    requireValue(warningBody.error?.code === 'blocklist_confirmation_required', 'blocklist-outgoing-conflict-code')
+    requireValue(typeof warningBody.error?.details?.warning_event_id === 'string', 'blocklist-outgoing-conflict-shape')
+
+    const acknowledged = await client(memberToken).functions.invoke('create-registration', {
+      body: { event_id: eventId, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(!acknowledged.error && acknowledged.data?.success === true, 'blocklist-acknowledgement-success')
+
+    result = await admin.from('event_registrations').delete().eq('event_id', eventId).eq('profile_id', member.id)
+    requireValue(!result.error, 'blocklist-reset-registration')
+    result = await admin.from('blocks').delete().eq('blocker_id', member.id).eq('blocked_id', peer.id)
+    requireValue(!result.error, 'blocklist-reset-outgoing')
+    result = await admin.from('blocks').insert({ blocker_id: peer.id, blocked_id: member.id })
+    requireValue(!result.error, 'blocklist-seed-reverse')
+    const reverse = await client(memberToken).functions.invoke('create-registration', { body: { event_id: eventId } })
+    requireValue(!reverse.error && reverse.data?.success === true, 'blocklist-reverse-hidden')
+    return ['blocklist-outgoing-conflict-409', 'blocklist-outgoing-conflict-code', 'blocklist-outgoing-conflict-shape',
+      'blocklist-acknowledgement-success', 'blocklist-reverse-hidden']
+  }
+
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
@@ -109,6 +150,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       return result.data.session.access_token
     },
     scenario,
+    blocklistScenario,
     async owner(id) {
       const result = await admin.auth.admin.getUserById(id)
       if (result.error?.status === 404) return null
@@ -121,6 +163,11 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     },
     async cleanData(plan) {
       const host = plan.users[0].id
+      if (plan.users.length > 2) {
+        const fixtureUserIds = plan.users.map((user) => user.id)
+        const blocks = await admin.from('blocks').delete().or(`blocker_id.in.(${fixtureUserIds.join(',')}),blocked_id.in.(${fixtureUserIds.join(',')})`)
+        requireValue(!blocks.error, 'cleanup-blocks')
+      }
       // Only known fixture IDs are removed. Unknown foreign-key dependencies fail closed.
       if (plan.seriesIds.length > 0) {
         const series = await admin.from('event_series').delete().in('id', plan.seriesIds).eq('creator_id', host)
@@ -176,11 +223,12 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       }
     },
   }
+  return adapter
 }
 
 async function main() {
   const command = Deno.args[0]
-  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'cleanup-run', 'command')
+  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'cleanup-run', 'command')
   const url = Deno.env.get('SUPABASE_URL')
   requireValue(url === STAGING_URL, 'environment')
   const serviceKey = Deno.env.get('SERVICE_ROLE_KEY')
@@ -204,7 +252,9 @@ async function main() {
     if (!result.ok) Deno.exitCode = 1
     return
   }
-  const result = await runFixture(url, createAdapter(url, serviceKey, anonKey),
+  const adapter = createAdapter(url, serviceKey, anonKey)
+  if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
+  const result = await runFixture(url, adapter,
     (runId) => console.log(JSON.stringify({ runId, stage: 'started' })))
   console.log(JSON.stringify({ ...result, project: 'xdknuxdhyvjgwlcliyqx', role: 'authenticated', aal: 'aal1' }))
   if (!result.ok) Deno.exitCode = 1
