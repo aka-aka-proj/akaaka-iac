@@ -1,23 +1,15 @@
 -- Run with the actual writer privileges before the definer conflict lookup.
--- This SELECT deliberately uses event RLS, so unauthorized writes cannot probe peers.
+-- Registration and approval must pass through the eligibility-checked endpoints.
 CREATE FUNCTION private.authorize_registration_blocklist()
 RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
 BEGIN
-  IF current_user IN ('anon', 'authenticated') AND (
-    (TG_OP = 'INSERT' AND NEW.status IN ('pending','approved','waitlisted','cancellation_pending','cancellation_rejected'))
-    OR (TG_OP = 'UPDATE' AND OLD.status = 'pending' AND NEW.status = 'approved')
+  -- Edge Functions enforce eligibility before the service-only RPC reaches here.
+  -- Direct writers must not probe conflicts before constraints/RLS reject them.
+  IF current_user IN ($r$anon$r$, $r$authenticated$r$) AND (
+    TG_OP = $op$INSERT$op$
+    OR (TG_OP = $op$UPDATE$op$ AND OLD.status = $s$pending$s$ AND NEW.status = $s$approved$s$)
   ) THEN
-    IF TG_OP = 'INSERT' THEN
-      IF NEW.profile_id IS DISTINCT FROM auth.uid() OR NOT EXISTS (
-        SELECT 1 FROM public.events e WHERE e.id = NEW.event_id
-      ) THEN
-        RAISE EXCEPTION 'forbidden' USING ERRCODE = 'P0001';
-      END IF;
-    ELSIF NOT EXISTS (
-      SELECT 1 FROM public.events e WHERE e.id = NEW.event_id AND e.creator_id = auth.uid()
-    ) THEN
-      RAISE EXCEPTION 'forbidden' USING ERRCODE = 'P0001';
-    END IF;
+    RAISE EXCEPTION $e$forbidden$e$ USING ERRCODE = $e$P0001$e$;
   END IF;
   RETURN NEW;
 END;

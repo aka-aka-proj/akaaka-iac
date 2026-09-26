@@ -129,7 +129,7 @@ RESET ROLE;
 UPDATE public.events SET visibility_settings=$json${"type":"public"}$json$ WHERE id=$id$19100000-0000-4000-8000-000000000012$id$;
 SET LOCAL ROLE authenticated;
 SELECT throws_ok($$INSERT INTO public.event_registrations(event_id,profile_id,status) VALUES ($id$19100000-0000-4000-8000-000000000012$id$,$id$19100000-0000-4000-8000-000000000002$id$,$s$pending$s$)$$,
- $s$P0001$s$,$s$blocklist_confirmation_required$s$,$s$visible self registration still receives conflict warning$s$);
+ $s$P0001$s$,$s$forbidden$s$,$s$direct registration must use the eligibility-checked endpoint$s$);
 SELECT throws_ok($$INSERT INTO public.event_registrations(event_id,profile_id,status) VALUES ($id$19100000-0000-4000-8000-000000000012$id$,$id$19100000-0000-4000-8000-000000000005$id$,$s$pending$s$)$$,
  $s$P0001$s$,$s$forbidden$s$,$s$another profile cannot be used to probe conflict information$s$);
 RESET ROLE;
