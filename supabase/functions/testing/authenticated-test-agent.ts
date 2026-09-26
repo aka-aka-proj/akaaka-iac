@@ -213,7 +213,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden']
   }
 
-  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
