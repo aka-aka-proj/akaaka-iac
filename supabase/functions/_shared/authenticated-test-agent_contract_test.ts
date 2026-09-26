@@ -24,3 +24,12 @@ Deno.test('hosted recurrence scenario covers issue 103 staging behavior matrix',
     if (!source.includes(marker)) throw new Error(`missing hosted recurrence evidence marker: ${marker}`)
   }
 })
+
+Deno.test('hosted blocklist series scenario covers atomic conflict and stale snapshot', () => {
+  for (const marker of [
+    'blocklist-series-conflict-all-or-nothing',
+    'blocklist-series-stale-snapshot-fail-closed',
+  ]) {
+    if (!source.includes(marker)) throw new Error(`missing hosted blocklist series evidence marker: ${marker}`)
+  }
+})
