@@ -110,8 +110,45 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     })
     requireValue(!acknowledged.error && acknowledged.data?.success === true, 'blocklist-acknowledgement-success')
 
+    // Acknowledgement is transaction/event scoped: a successful acknowledgement for one event
+    // must never suppress a conflict warning for a different event.
+    const scopedEventId = plan.eventIds[1]
+    result = await admin.from('events').insert({
+      id: scopedEventId, creator_id: host.id, title: `Fixture ${plan.runId} blocklist scoped`, event_type: 'workshop',
+      start_time: new Date(Date.now() + 8 * 86400000).toISOString(), lifecycle_status: 'registration_open',
+      publication_status: 'published', visibility_settings: { type: 'public' }, max_capacity: 10,
+    })
+    requireValue(!result.error, 'blocklist-scope-seed-event')
+    result = await admin.from('event_registrations').insert({ event_id: scopedEventId, profile_id: peer.id, status: 'approved' })
+    requireValue(!result.error, 'blocklist-scope-seed-peer')
+    const scoped = await client(memberToken).functions.invoke('create-registration', { body: { event_id: scopedEventId } })
+    requireValue(scoped.error?.context instanceof Response && scoped.error.context.status === 409, 'blocklist-acknowledgement-event-scoped')
+
     result = await admin.from('event_registrations').delete().eq('event_id', eventId).eq('profile_id', member.id)
     requireValue(!result.error, 'blocklist-reset-registration')
+
+    // Only active/co-present registration states contribute to the warning. Exercise the
+    // canonical status matrix against the same actor pair to keep directionality constant.
+    for (const [status, conflicts] of [
+      ['pending', true],
+      ['approved', true],
+      ['waitlisted', true],
+      ['cancellation_pending', true],
+      ['cancellation_rejected', true],
+      ['rejected', false],
+      ['cancelled', false],
+    ] as const) {
+      result = await admin.from('event_registrations').update({ status }).eq('event_id', eventId).eq('profile_id', peer.id)
+      requireValue(!result.error, `blocklist-status-${status}-seed`)
+      const attempt = await client(memberToken).functions.invoke('create-registration', { body: { event_id: eventId } })
+      const warned = attempt.error?.context instanceof Response && attempt.error.context.status === 409
+      requireValue(conflicts ? warned : (!attempt.error && attempt.data?.success === true), `blocklist-status-${status}-${conflicts ? 'conflict' : 'ignored'}`)
+      if (!conflicts) {
+        result = await admin.from('event_registrations').delete().eq('event_id', eventId).eq('profile_id', member.id)
+        requireValue(!result.error, `blocklist-status-${status}-reset`)
+      }
+    }
+
     result = await admin.from('blocks').delete().eq('blocker_id', member.id).eq('blocked_id', peer.id)
     requireValue(!result.error, 'blocklist-reset-outgoing')
     result = await admin.from('blocks').insert({ blocker_id: peer.id, blocked_id: member.id })
@@ -119,7 +156,10 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     const reverse = await client(memberToken).functions.invoke('create-registration', { body: { event_id: eventId } })
     requireValue(!reverse.error && reverse.data?.success === true, 'blocklist-reverse-hidden')
     return ['blocklist-outgoing-conflict-409', 'blocklist-outgoing-conflict-code', 'blocklist-outgoing-conflict-shape',
-      'blocklist-acknowledgement-success', 'blocklist-reverse-hidden']
+      'blocklist-acknowledgement-success', 'blocklist-acknowledgement-event-scoped',
+      'blocklist-status-pending-conflict', 'blocklist-status-approved-conflict', 'blocklist-status-waitlisted-conflict',
+      'blocklist-status-cancellation_pending-conflict', 'blocklist-status-cancellation_rejected-conflict',
+      'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden']
   }
 
   const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
