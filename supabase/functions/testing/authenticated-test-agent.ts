@@ -19,7 +19,7 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
-export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; blocklistSeriesScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
   const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
@@ -338,7 +338,6 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     },
     scenario,
     blocklistScenario,
-    blocklistSeriesScenario,
     recurrenceScenario,
     shareTokenScenario,
     async owner(id) {
@@ -444,7 +443,7 @@ async function main() {
   }
   const adapter = createAdapter(url, serviceKey, anonKey)
   if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
-  if (command === 'verify-blocklist-series-conflict') adapter.scenario = adapter.blocklistSeriesScenario
+  if (command === 'verify-blocklist-series-conflict') adapter.scenario = blocklistSeriesScenario
   if (command === 'verify-recurrence-behavior') adapter.scenario = adapter.recurrenceScenario
   if (command === 'verify-share-token') adapter.scenario = adapter.shareTokenScenario
   const result = await runFixture(url, adapter,
