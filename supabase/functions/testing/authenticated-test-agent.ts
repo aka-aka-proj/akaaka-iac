@@ -214,6 +214,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
   }
 
   async function blocklistSeriesScenario(plan: FixturePlan, sessions: string[]) {
+    // Keep this fixture isolated so every failed acknowledgement path can prove zero partial writes.
     const [host, member] = plan.users
     const [hostToken, memberToken] = sessions
     const peer = { id: crypto.randomUUID(), email: `iac.patrol.test.${plan.runId}.series-peer@example.com`, password: `Aa1!${crypto.randomUUID()}` }
