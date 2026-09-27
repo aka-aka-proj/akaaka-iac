@@ -412,6 +412,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       }
     },
   }
+  ;(adapter as typeof adapter & { blocklistSeriesScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> }).blocklistSeriesScenario = blocklistSeriesScenario
   return adapter
 }
 
@@ -443,7 +444,7 @@ async function main() {
   }
   const adapter = createAdapter(url, serviceKey, anonKey)
   if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
-  if (command === 'verify-blocklist-series-conflict') adapter.scenario = blocklistSeriesScenario
+  if (command === 'verify-blocklist-series-conflict') adapter.scenario = (adapter as typeof adapter & { blocklistSeriesScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> }).blocklistSeriesScenario
   if (command === 'verify-recurrence-behavior') adapter.scenario = adapter.recurrenceScenario
   if (command === 'verify-share-token') adapter.scenario = adapter.shareTokenScenario
   const result = await runFixture(url, adapter,
