@@ -6,6 +6,7 @@ repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 workflow="$repo_root/.github/workflows/iac-ci.yml"
 metadata_workflow="$repo_root/.github/workflows/iac-contract-edit.yml"
 staging_workflow="$repo_root/.github/workflows/iac-staging-cd.yml"
+auth_agent_workflow="$repo_root/.github/workflows/auth-test-agent.yml"
 template="$repo_root/.github/pull_request_template.md"
 hook="$repo_root/.githooks/pre-push"
 fetch_contract="$repo_root/scripts/ci/fetch-pr-contract-inputs.sh"
@@ -34,6 +35,7 @@ require_literal "$staging_workflow" 'branches:'
 require_literal "$staging_workflow" '- preview'
 require_literal "$staging_workflow" 'environment:'
 require_literal "$staging_workflow" 'name: staging'
+require_literal "$auth_agent_workflow" '          - verify-blocklist-series-conflict'
 require_literal "$fetch_contract" '.previous_filename // empty'
 require_literal "$fetch_contract" 'changed_files'
 require_literal "$fetch_contract" '-ge 3000'
