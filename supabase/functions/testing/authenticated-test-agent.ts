@@ -19,7 +19,7 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
-export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; blocklistSeriesScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
   const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
@@ -213,6 +213,66 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden']
   }
 
+  async function blocklistSeriesScenario(plan: FixturePlan, sessions: string[]) {
+    const [host, member] = plan.users
+    const [hostToken, memberToken] = sessions
+    const peer = { id: crypto.randomUUID(), email: `iac.patrol.test.${plan.runId}.series-peer@example.com`, password: `Aa1!${crypto.randomUUID()}` }
+    await adapter.provision(peer, plan.runId)
+    plan.users.push(peer)
+
+    const seriesId = plan.seriesIds[0]
+    const eventIds = plan.eventIds.slice(0, 2)
+    let result = await admin.from('event_series').insert({
+      id: seriesId, creator_id: host.id, title: `Fixture ${plan.runId}`, lifecycle_status: 'draft',
+    })
+    requireValue(!result.error, 'blocklist-series-seed-series')
+    result = await admin.from('events').insert(eventIds.map((id, i) => ({
+      id, creator_id: host.id, title: `Fixture ${plan.runId} blocklist series ${i}`, event_type: 'workshop',
+      start_time: new Date(Date.now() + (7 + i) * 86400000).toISOString(), lifecycle_status: 'draft',
+      publication_status: 'closed', visibility_settings: { type: 'public' }, max_capacity: 10,
+    })))
+    requireValue(!result.error, 'blocklist-series-seed-events')
+    result = await admin.from('event_series_membership').insert(eventIds.map((event_id, i) => ({
+      series_id: seriesId, event_id, position: i + 1,
+    })))
+    requireValue(!result.error, 'blocklist-series-seed-membership')
+    const published = await client(hostToken).functions.invoke('publish-event-series', { body: { series_id: seriesId } })
+    requireValue(!published.error && published.data?.success === true, 'blocklist-series-publish')
+
+    result = await admin.from('event_registrations').insert({ event_id: eventIds[1], profile_id: peer.id, status: 'approved' })
+    requireValue(!result.error, 'blocklist-series-seed-peer')
+    result = await admin.from('blocks').insert({ blocker_id: member.id, blocked_id: peer.id })
+    requireValue(!result.error, 'blocklist-series-seed-outgoing')
+
+    const conflict = await client(memberToken).functions.invoke('register-for-event-series', { body: { series_id: seriesId } })
+    requireValue(conflict.error?.context instanceof Response && conflict.error.context.status === 409, 'blocklist-series-conflict-status')
+    const conflictBody = await conflict.error.context.json()
+    const expectedEventIds = conflictBody.error?.details?.expected_event_ids
+    requireValue(conflictBody.error?.code === 'blocklist_confirmation_required' &&
+      Array.isArray(expectedEventIds) && expectedEventIds.length === eventIds.length, 'blocklist-series-conflict-shape')
+    const afterConflict = await admin.from('event_registrations').select('id').in('event_id', eventIds).eq('profile_id', member.id)
+    const afterConflictSeries = await admin.from('event_series_registrations').select('id').eq('series_id', seriesId).eq('profile_id', member.id)
+    requireValue(!afterConflict.error && afterConflict.data?.length === 0 &&
+      !afterConflictSeries.error && afterConflictSeries.data?.length === 0, 'blocklist-series-conflict-all-or-nothing')
+
+    const stale = await client(memberToken).functions.invoke('register-for-event-series', {
+      body: { series_id: seriesId, acknowledge_blocklist_conflict: true, expected_event_ids: expectedEventIds.slice(0, -1) },
+    })
+    requireValue(stale.error?.context instanceof Response && stale.error.context.status === 409, 'blocklist-series-stale-status')
+    const afterStale = await admin.from('event_registrations').select('id').in('event_id', eventIds).eq('profile_id', member.id)
+    const afterStaleSeries = await admin.from('event_series_registrations').select('id').eq('series_id', seriesId).eq('profile_id', member.id)
+    requireValue(!afterStale.error && afterStale.data?.length === 0 &&
+      !afterStaleSeries.error && afterStaleSeries.data?.length === 0, 'blocklist-series-stale-snapshot-fail-closed')
+
+    const acknowledged = await client(memberToken).functions.invoke('register-for-event-series', {
+      body: { series_id: seriesId, acknowledge_blocklist_conflict: true, expected_event_ids: expectedEventIds },
+    })
+    requireValue(!acknowledged.error && acknowledged.data?.success === true &&
+      acknowledged.data?.event_registration_count === eventIds.length, 'blocklist-series-acknowledged-success')
+    return ['blocklist-series-conflict-all-or-nothing', 'blocklist-series-stale-snapshot-fail-closed',
+      'blocklist-series-acknowledged-success']
+  }
+
   async function shareTokenScenario(plan: FixturePlan, sessions: string[]) {
     const [host] = plan.users
     const [hostToken] = sessions
@@ -248,7 +308,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'share-token-anon-invalid-hidden', 'share-token-hygiene-clears-off-private']
   }
 
-  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; blocklistSeriesScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
@@ -277,6 +337,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     },
     scenario,
     blocklistScenario,
+    blocklistSeriesScenario,
     recurrenceScenario,
     shareTokenScenario,
     async owner(id) {
@@ -356,7 +417,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
 
 async function main() {
   const command = Deno.args[0]
-  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'verify-recurrence-behavior' || command === 'verify-share-token' || command === 'cleanup-run', 'command')
+  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'verify-blocklist-series-conflict' || command === 'verify-recurrence-behavior' || command === 'verify-share-token' || command === 'cleanup-run', 'command')
   const url = Deno.env.get('SUPABASE_URL')
   requireValue(url === STAGING_URL, 'environment')
   const serviceKey = Deno.env.get('SERVICE_ROLE_KEY')
@@ -382,6 +443,7 @@ async function main() {
   }
   const adapter = createAdapter(url, serviceKey, anonKey)
   if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
+  if (command === 'verify-blocklist-series-conflict') adapter.scenario = adapter.blocklistSeriesScenario
   if (command === 'verify-recurrence-behavior') adapter.scenario = adapter.recurrenceScenario
   if (command === 'verify-share-token') adapter.scenario = adapter.shareTokenScenario
   const result = await runFixture(url, adapter,
