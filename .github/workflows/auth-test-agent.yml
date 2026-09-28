@@ -12,6 +12,7 @@ on:
           - list
           - verify-series-notification
           - verify-blocklist-conflict
+          - verify-blocklist-series-conflict
           - verify-recurrence-behavior
           - verify-share-token
           - cleanup-run
