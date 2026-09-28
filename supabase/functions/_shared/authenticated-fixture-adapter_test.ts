@@ -123,3 +123,11 @@ Deno.test('authenticated fixture exposes a dedicated blocklist-conflict hosted s
   assert(source.includes("'blocklist-reverse-hidden'"), 'scenario must prove reverse direction does not leak a warning')
   assert(source.includes("'blocklist-acknowledgement-success'"), 'scenario must prove explicit acknowledgement succeeds')
 })
+
+Deno.test("every hosted verification command can be dispatched through the workflow", async () => {
+  const source = await Deno.readTextFile(new URL("../testing/authenticated-test-agent.ts", import.meta.url))
+  const workflow = await Deno.readTextFile(new URL("../../../.github/workflows/auth-test-agent.yml", import.meta.url))
+  const commands = new Set(source.match(/verify-[a-z-]+/g))
+  assert(commands.size > 0)
+  for (const command of commands) assert(workflow.includes(`          - ${command}\n`), `missing workflow command: ${command}`)
+})
