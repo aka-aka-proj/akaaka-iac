@@ -99,7 +99,7 @@ Deno.serve(async (req: Request) => {
       .maybeSingle()
 
     if (existingReg) {
-      return errorResponse('duplicate_registration', 'You are already registered for this series', 400)
+      return errorResponse('duplicate_registration', 'You are already registered for this series', 409)
     }
 
     // 3. Fetch all member events

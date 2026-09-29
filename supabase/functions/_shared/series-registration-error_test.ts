@@ -2,7 +2,7 @@ import { seriesRegistrationError } from './series-registration-error.ts'
 
 Deno.test('concurrent duplicate registration returns a safe duplicate response', () => {
   const result = seriesRegistrationError({ code: '23505', message: 'duplicate key violates unique constraint secret_constraint' })
-  if (result.status !== 400 || result.error.code !== 'duplicate_registration') throw new Error('expected 400 duplicate_registration')
+  if (result.status !== 409 || result.error.code !== 'duplicate_registration') throw new Error('expected 409 duplicate_registration')
   if (JSON.stringify(result).includes('secret_constraint')) throw new Error('database detail exposed')
 })
 

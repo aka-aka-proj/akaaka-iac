@@ -1,7 +1,7 @@
 export function seriesRegistrationError(error: { code?: string; message?: string } | null) {
   if (error?.code === '23505') {
     return {
-      status: 400,
+      status: 409,
       error: { code: 'duplicate_registration', message: 'You are already registered for this series' },
     }
   }

@@ -325,7 +325,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     requireValue(raced.filter(item => !item.error && item.data?.success === true &&
       item.data?.event_registration_count === eventIds.length).length === 1, 'blocklist-series-acknowledged-success')
     requireValue(raced.filter(item => item.error?.context instanceof Response &&
-      [400, 409].includes(item.error.context.status)).length === 1, 'blocklist-series-concurrent-retry-rejected')
+      item.error.context.status === 409).length === 1, 'blocklist-series-concurrent-retry-rejected')
     const finalMembers = await admin.from('event_registrations').select('id').in('event_id', eventIds).eq('profile_id', member.id)
     const finalSeries = await admin.from('event_series_registrations').select('id').eq('series_id', seriesId).eq('profile_id', member.id)
     requireValue(!finalMembers.error && finalMembers.data?.length === eventIds.length &&
