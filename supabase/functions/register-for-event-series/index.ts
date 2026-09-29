@@ -1,3 +1,4 @@
+import { seriesRegistrationError } from '../_shared/series-registration-error.ts'
 import { createClient } from '@supabase/supabase-js'
 import { parseBlocklistAcknowledgment, blocklistConflictResponse } from '../_shared/blocklist-conflict.ts'
 
@@ -231,12 +232,8 @@ Deno.serve(async (req: Request) => {
       if (conflict) return jsonResponse({ error: { ...conflict.error, details: { ...conflict.error.details, expected_event_ids: expectedEventIds } } }, 409)
       if (atomicError?.message === 'registration_blocked') return errorResponse('blocked', 'Registration is unavailable.', 403)
       console.error('Failed to atomically register for series:', atomicError)
-      const isRetryableRace = atomicError?.message?.includes('capacity') || atomicError?.message?.includes('membership changed')
-      return errorResponse(
-        isRetryableRace ? 'registration_conflict' : 'internal_error',
-        isRetryableRace ? 'The series changed while you were registering. Please try again.' : 'Failed to register for every member event',
-        isRetryableRace ? 409 : 500,
-      )
+      const failure = seriesRegistrationError(atomicError)
+      return errorResponse(failure.error.code, failure.error.message, failure.status)
     }
 
     console.log(`Series registration ${atomicRegistration.registration_id}: ${atomicRegistration.event_registration_count}/${events.length} event registrations created`)
