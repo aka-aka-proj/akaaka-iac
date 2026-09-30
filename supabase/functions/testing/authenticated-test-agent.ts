@@ -60,7 +60,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     await notifications(hostToken, seriesId, 1)
     await notifications(memberToken, seriesId, 0)
     const duplicate = await client(memberToken).functions.invoke('register-for-event-series', { body: { series_id: seriesId } })
-    requireValue(duplicate.error?.context instanceof Response && duplicate.error.context.status === 400, 'duplicate-status')
+    requireValue(duplicate.error?.context instanceof Response && duplicate.error.context.status === 409, 'duplicate-status')
     const duplicateBody = await duplicate.error.context.json()
     requireValue(duplicateBody.error?.code === 'duplicate_registration', 'duplicate-code')
     await notifications(hostToken, seriesId, 1)
