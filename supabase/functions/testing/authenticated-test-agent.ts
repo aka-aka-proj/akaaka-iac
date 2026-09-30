@@ -60,7 +60,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     await notifications(hostToken, seriesId, 1)
     await notifications(memberToken, seriesId, 0)
     const duplicate = await client(memberToken).functions.invoke('register-for-event-series', { body: { series_id: seriesId } })
-    requireValue(duplicate.error?.context instanceof Response && duplicate.error.context.status === 400, 'duplicate-status')
+    requireValue(duplicate.error?.context instanceof Response && duplicate.error.context.status === 409, 'duplicate-status')
     const duplicateBody = await duplicate.error.context.json()
     requireValue(duplicateBody.error?.code === 'duplicate_registration', 'duplicate-code')
     await notifications(hostToken, seriesId, 1)
@@ -134,7 +134,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
 
   async function blocklistScenario(plan: FixturePlan, sessions: string[]) {
     const [host, member] = plan.users
-    const [, memberToken] = sessions
+    const [hostToken, memberToken] = sessions
     const peer = { id: crypto.randomUUID(), email: `iac.patrol.test.${plan.runId}.peer@example.com`, password: `Aa1!${crypto.randomUUID()}` }
     await adapter.provision(peer, plan.runId)
     plan.users.push(peer)
@@ -204,13 +204,67 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     requireValue(!result.error, 'blocklist-reset-outgoing')
     result = await admin.from('blocks').insert({ blocker_id: peer.id, blocked_id: member.id })
     requireValue(!result.error, 'blocklist-seed-reverse')
-    const reverse = await client(memberToken).functions.invoke('create-registration', { body: { event_id: eventId } })
+    // Keep the peer approved for reverse-only and host-review evidence.
+    const direct = await client(memberToken).from('event_registrations').insert({
+      event_id: scopedEventId, profile_id: member.id, status: 'pending',
+    })
+    requireValue(direct.error?.message === 'forbidden', 'blocklist-direct-write-denied')
+    const reverse = await client(memberToken).functions.invoke('create-registration', { body: { event_id: scopedEventId } })
     requireValue(!reverse.error && reverse.data?.success === true, 'blocklist-reverse-hidden')
+    const registration = await admin.from('event_registrations').select('id,status')
+      .eq('event_id', scopedEventId).eq('profile_id', member.id).single()
+    requireValue(!registration.error && registration.data?.status === 'pending', 'blocklist-review-pending')
+    const reviewBody = { event_id: scopedEventId, registration_id: registration.data.id, action: 'approve' }
+    const forbidden = await client(memberToken).functions.invoke('review-registration', {
+      body: { ...reviewBody, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(forbidden.error?.context instanceof Response && forbidden.error.context.status === 403, 'blocklist-review-owner-only')
+    const review = await client(hostToken).functions.invoke('review-registration', { body: reviewBody })
+    requireValue(review.error?.context instanceof Response && review.error.context.status === 409, 'blocklist-review-conflict')
+    const reviewError = await review.error.context.json()
+    requireValue(reviewError.error?.code === 'blocklist_confirmation_required' &&
+      JSON.stringify(reviewError.error.details) === '{}' &&
+      !JSON.stringify(reviewError).includes(peer.id) && !JSON.stringify(reviewError).includes(member.id),
+      'blocklist-review-anonymous-shape')
+    const unchanged = await admin.from('event_registrations').select('status').eq('id', registration.data.id).single()
+    requireValue(!unchanged.error && unchanged.data?.status === 'pending', 'blocklist-review-warning-no-write')
+    const approved = await client(hostToken).functions.invoke('review-registration', {
+      body: { ...reviewBody, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(!approved.error && approved.data?.registration?.status === 'approved', 'blocklist-review-acknowledged')
+    const repeated = await client(hostToken).functions.invoke('review-registration', {
+      body: { ...reviewBody, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(repeated.error?.context instanceof Response && repeated.error.context.status === 400, 'blocklist-review-repeat-denied')
+
+    // Both pending applicants race: the event lock must serialize the conflict check.
+    result = await admin.from('event_registrations').delete().eq('event_id', scopedEventId).eq('profile_id', member.id)
+    requireValue(!result.error, 'blocklist-review-race-reset-member')
+    result = await admin.from('event_registrations').update({ status: 'pending' })
+      .eq('event_id', scopedEventId).eq('profile_id', peer.id)
+    requireValue(!result.error, 'blocklist-review-race-reset-peer')
+    const pending = await client(memberToken).functions.invoke('create-registration', { body: { event_id: scopedEventId } })
+    requireValue(!pending.error, 'blocklist-review-race-register')
+    const candidates = await admin.from('event_registrations').select('id,status').eq('event_id', scopedEventId)
+    requireValue(!candidates.error && candidates.data?.length === 2 && candidates.data.every(row => row.status === 'pending'),
+      'blocklist-review-race-fixture')
+    const raced = await Promise.all(candidates.data.map(row => client(hostToken).functions.invoke('review-registration', {
+      body: { event_id: scopedEventId, registration_id: row.id, action: 'approve' },
+    })))
+    requireValue(raced.filter(item => !item.error && item.data?.registration?.status === 'approved').length === 1 &&
+      raced.filter(item => item.error?.context instanceof Response && item.error.context.status === 409).length === 1,
+      'blocklist-review-concurrent-serialized')
+    const final = await admin.from('event_registrations').select('status').eq('event_id', scopedEventId)
+    requireValue(!final.error && final.data?.filter(row => row.status === 'approved').length === 1 &&
+      final.data?.filter(row => row.status === 'pending').length === 1, 'blocklist-review-concurrent-state')
     return ['blocklist-outgoing-conflict-409', 'blocklist-outgoing-conflict-code', 'blocklist-outgoing-conflict-shape',
       'blocklist-acknowledgement-success', 'blocklist-acknowledgement-event-scoped',
       'blocklist-status-pending-conflict', 'blocklist-status-approved-conflict', 'blocklist-status-waitlisted-conflict',
       'blocklist-status-cancellation_pending-conflict', 'blocklist-status-cancellation_rejected-conflict',
-      'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden']
+      'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden',
+      'blocklist-direct-write-denied', 'blocklist-review-owner-only', 'blocklist-review-conflict',
+      'blocklist-review-anonymous-shape', 'blocklist-review-warning-no-write', 'blocklist-review-acknowledged',
+      'blocklist-review-repeat-denied', 'blocklist-review-concurrent-serialized', 'blocklist-review-concurrent-state']
   }
 
   async function blocklistSeriesScenario(plan: FixturePlan, sessions: string[]) {
@@ -265,13 +319,19 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     requireValue(!afterStale.error && afterStale.data?.length === 0 &&
       !afterStaleSeries.error && afterStaleSeries.data?.length === 0, 'blocklist-series-stale-snapshot-fail-closed')
 
-    const acknowledged = await client(memberToken).functions.invoke('register-for-event-series', {
+    const raced = await Promise.all([0, 1].map(() => client(memberToken).functions.invoke('register-for-event-series', {
       body: { series_id: seriesId, acknowledge_blocklist_conflict: true, expected_event_ids: expectedEventIds },
-    })
-    requireValue(!acknowledged.error && acknowledged.data?.success === true &&
-      acknowledged.data?.event_registration_count === eventIds.length, 'blocklist-series-acknowledged-success')
+    })))
+    requireValue(raced.filter(item => !item.error && item.data?.success === true &&
+      item.data?.event_registration_count === eventIds.length).length === 1, 'blocklist-series-acknowledged-success')
+    requireValue(raced.filter(item => item.error?.context instanceof Response &&
+      item.error.context.status === 409).length === 1, 'blocklist-series-concurrent-retry-rejected')
+    const finalMembers = await admin.from('event_registrations').select('id').in('event_id', eventIds).eq('profile_id', member.id)
+    const finalSeries = await admin.from('event_series_registrations').select('id').eq('series_id', seriesId).eq('profile_id', member.id)
+    requireValue(!finalMembers.error && finalMembers.data?.length === eventIds.length &&
+      !finalSeries.error && finalSeries.data?.length === 1, 'blocklist-series-concurrent-no-duplicates')
     return ['blocklist-series-conflict-all-or-nothing', 'blocklist-series-stale-snapshot-fail-closed',
-      'blocklist-series-acknowledged-success']
+      'blocklist-series-acknowledged-success', 'blocklist-series-concurrent-retry-rejected', 'blocklist-series-concurrent-no-duplicates']
   }
 
   async function shareTokenScenario(plan: FixturePlan, sessions: string[]) {
