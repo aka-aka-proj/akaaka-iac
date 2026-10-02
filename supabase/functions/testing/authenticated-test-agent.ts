@@ -19,7 +19,7 @@ function safeHttpFailureStage(operation: string, error: unknown): string {
   return safeCode ? `${operation}-http-${status}-code-${safeCode}` : `${operation}-http-${status}`
 }
 
-export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter {
+export function createAdapter(url: string, serviceKey: string, anonKey: string, transport: typeof fetch = fetch): FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } {
   requireValue(url === STAGING_URL, 'environment')
   const boundedFetch: typeof fetch = (input, init) => transport(input, { ...init, signal: AbortSignal.timeout(20000) })
   const admin = createClient(url, serviceKey, { ...options, global: { fetch: boundedFetch } })
@@ -60,7 +60,7 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     await notifications(hostToken, seriesId, 1)
     await notifications(memberToken, seriesId, 0)
     const duplicate = await client(memberToken).functions.invoke('register-for-event-series', { body: { series_id: seriesId } })
-    requireValue(duplicate.error?.context instanceof Response && duplicate.error.context.status === 400, 'duplicate-status')
+    requireValue(duplicate.error?.context instanceof Response && duplicate.error.context.status === 409, 'duplicate-status')
     const duplicateBody = await duplicate.error.context.json()
     requireValue(duplicateBody.error?.code === 'duplicate_registration', 'duplicate-code')
     await notifications(hostToken, seriesId, 1)
@@ -81,7 +81,295 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       'duplicate-registration-denied', 'service-fixture-pending-silent', 'service-fixture-approval-once']
   }
 
-  return {
+  async function recurrenceScenario(plan: FixturePlan, sessions: string[]) {
+    const [host] = plan.users
+    const [hostToken] = sessions
+    const offsetParent = plan.eventIds[0]
+    const legacyParent = plan.eventIds[1]
+    const base = new Date(Date.now() + 21 * 86400000)
+    const legacyDeadline = new Date(base.getTime() - 3 * 86400000).toISOString()
+    const result = await admin.from('events').insert([
+      {
+        id: offsetParent, creator_id: host.id, title: `Fixture ${plan.runId} recurrence offset`, event_type: 'workshop',
+        start_time: base.toISOString(), registration_deadline: legacyDeadline, lifecycle_status: 'draft',
+        publication_status: 'closed', visibility_settings: { type: 'public' }, max_capacity: 10,
+      },
+      {
+        id: legacyParent, creator_id: host.id, title: `Fixture ${plan.runId} recurrence legacy`, event_type: 'workshop',
+        start_time: base.toISOString(), registration_deadline: legacyDeadline, lifecycle_status: 'draft',
+        publication_status: 'closed', visibility_settings: { type: 'public' }, max_capacity: 10,
+      },
+    ])
+    requireValue(!result.error, 'recurrence-seed-parents')
+
+    const offsetRule = { frequency: 'weekly', interval: 1, days: [base.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' })], count: 2,
+      timezone: 'UTC', registration_deadline_offset_minutes: 1440 }
+    const offset = await client(hostToken).functions.invoke('create-recurring-events', {
+      body: { parent_event_id: offsetParent, recurrence_rule: offsetRule, start_time: base.toISOString() },
+    })
+    requireValue(!offset.error && offset.data?.success === true && offset.data?.created_instance_count === 1, 'recurrence-offset-create')
+    const offsetChildId = offset.data.instance_ids?.[1]
+    requireValue(typeof offsetChildId === 'string', 'recurrence-offset-child')
+    const offsetChild = await admin.from('events').select('start_time,registration_deadline').eq('id', offsetChildId).single()
+    requireValue(!offsetChild.error && offsetChild.data?.registration_deadline &&
+      new Date(offsetChild.data.start_time).getTime() - new Date(offsetChild.data.registration_deadline).getTime() === 1440 * 60000,
+      'recurrence-offset-instance-deadline')
+    plan.eventIds.push(offsetChildId)
+
+    const legacyRule = { frequency: 'weekly', interval: 1, days: [base.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' })], count: 2, timezone: 'UTC' }
+    const legacy = await client(hostToken).functions.invoke('create-recurring-events', {
+      body: { parent_event_id: legacyParent, recurrence_rule: legacyRule, start_time: base.toISOString() },
+    })
+    requireValue(!legacy.error && legacy.data?.success === true && legacy.data?.created_instance_count === 1, 'recurrence-legacy-create')
+    const legacyChildId = legacy.data.instance_ids?.[1]
+    requireValue(typeof legacyChildId === 'string', 'recurrence-legacy-child')
+    const legacyChild = await admin.from('events').select('registration_deadline').eq('id', legacyChildId).single()
+    requireValue(!legacyChild.error && legacyChild.data?.registration_deadline === legacyDeadline, 'recurrence-legacy-absolute-deadline')
+    plan.eventIds.push(legacyChildId)
+
+    const locked = await admin.from('events').update({ start_time: new Date(base.getTime() + 8 * 86400000).toISOString() }).eq('id', offsetChildId)
+    requireValue(!!locked.error, 'recurrence-scheduling-lock-rejected')
+    return ['recurrence-offset-instance-deadline', 'recurrence-legacy-absolute-deadline', 'recurrence-scheduling-lock-rejected']
+  }
+
+  async function blocklistScenario(plan: FixturePlan, sessions: string[]) {
+    const [host, member] = plan.users
+    const [hostToken, memberToken] = sessions
+    const peer = { id: crypto.randomUUID(), email: `iac.patrol.test.${plan.runId}.peer@example.com`, password: `Aa1!${crypto.randomUUID()}` }
+    await adapter.provision(peer, plan.runId)
+    plan.users.push(peer)
+    const eventId = plan.eventIds[0]
+    let result = await admin.from('events').insert({
+      id: eventId, creator_id: host.id, title: `Fixture ${plan.runId} blocklist`, event_type: 'workshop',
+      start_time: new Date(Date.now() + 7 * 86400000).toISOString(), lifecycle_status: 'registration_open',
+      publication_status: 'published', visibility_settings: { type: 'public' }, max_capacity: 10,
+    })
+    requireValue(!result.error, 'blocklist-seed-event')
+    result = await admin.from('event_registrations').insert({ event_id: eventId, profile_id: peer.id, status: 'approved' })
+    requireValue(!result.error, 'blocklist-seed-peer')
+    result = await admin.from('blocks').insert({ blocker_id: member.id, blocked_id: peer.id })
+    requireValue(!result.error, 'blocklist-seed-outgoing')
+
+    const warning = await client(memberToken).functions.invoke('create-registration', { body: { event_id: eventId } })
+    requireValue(warning.error?.context instanceof Response && warning.error.context.status === 409, 'blocklist-outgoing-conflict-409')
+    const warningBody = await warning.error.context.json()
+    requireValue(warningBody.error?.code === 'blocklist_confirmation_required', 'blocklist-outgoing-conflict-code')
+    requireValue(typeof warningBody.error?.details?.warning_event_id === 'string', 'blocklist-outgoing-conflict-shape')
+
+    const acknowledged = await client(memberToken).functions.invoke('create-registration', {
+      body: { event_id: eventId, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(!acknowledged.error && acknowledged.data?.success === true, 'blocklist-acknowledgement-success')
+
+    // Acknowledgement is transaction/event scoped: a successful acknowledgement for one event
+    // must never suppress a conflict warning for a different event.
+    const scopedEventId = plan.eventIds[1]
+    result = await admin.from('events').insert({
+      id: scopedEventId, creator_id: host.id, title: `Fixture ${plan.runId} blocklist scoped`, event_type: 'workshop',
+      start_time: new Date(Date.now() + 8 * 86400000).toISOString(), lifecycle_status: 'registration_open',
+      publication_status: 'published', visibility_settings: { type: 'public' }, max_capacity: 10,
+    })
+    requireValue(!result.error, 'blocklist-scope-seed-event')
+    result = await admin.from('event_registrations').insert({ event_id: scopedEventId, profile_id: peer.id, status: 'approved' })
+    requireValue(!result.error, 'blocklist-scope-seed-peer')
+    const scoped = await client(memberToken).functions.invoke('create-registration', { body: { event_id: scopedEventId } })
+    requireValue(scoped.error?.context instanceof Response && scoped.error.context.status === 409, 'blocklist-acknowledgement-event-scoped')
+
+    result = await admin.from('event_registrations').delete().eq('event_id', eventId).eq('profile_id', member.id)
+    requireValue(!result.error, 'blocklist-reset-registration')
+
+    // Only active/co-present registration states contribute to the warning. Exercise the
+    // canonical status matrix against the same actor pair to keep directionality constant.
+    for (const [status, conflicts] of [
+      ['pending', true],
+      ['approved', true],
+      ['waitlisted', true],
+      ['cancellation_pending', true],
+      ['cancellation_rejected', true],
+      ['rejected', false],
+      ['cancelled', false],
+    ] as const) {
+      result = await admin.from('event_registrations').update({ status }).eq('event_id', eventId).eq('profile_id', peer.id)
+      requireValue(!result.error, `blocklist-status-${status}-seed`)
+      const attempt = await client(memberToken).functions.invoke('create-registration', { body: { event_id: eventId } })
+      const warned = attempt.error?.context instanceof Response && attempt.error.context.status === 409
+      requireValue(conflicts ? warned : (!attempt.error && attempt.data?.success === true), `blocklist-status-${status}-${conflicts ? 'conflict' : 'ignored'}`)
+      if (!conflicts) {
+        result = await admin.from('event_registrations').delete().eq('event_id', eventId).eq('profile_id', member.id)
+        requireValue(!result.error, `blocklist-status-${status}-reset`)
+      }
+    }
+
+    result = await admin.from('blocks').delete().eq('blocker_id', member.id).eq('blocked_id', peer.id)
+    requireValue(!result.error, 'blocklist-reset-outgoing')
+    result = await admin.from('blocks').insert({ blocker_id: peer.id, blocked_id: member.id })
+    requireValue(!result.error, 'blocklist-seed-reverse')
+    // Keep the peer approved for reverse-only and host-review evidence.
+    const direct = await client(memberToken).from('event_registrations').insert({
+      event_id: scopedEventId, profile_id: member.id, status: 'pending',
+    })
+    requireValue(direct.error?.message === 'forbidden', 'blocklist-direct-write-denied')
+    const reverse = await client(memberToken).functions.invoke('create-registration', { body: { event_id: scopedEventId } })
+    requireValue(!reverse.error && reverse.data?.success === true, 'blocklist-reverse-hidden')
+    const registration = await admin.from('event_registrations').select('id,status')
+      .eq('event_id', scopedEventId).eq('profile_id', member.id).single()
+    requireValue(!registration.error && registration.data?.status === 'pending', 'blocklist-review-pending')
+    const reviewBody = { event_id: scopedEventId, registration_id: registration.data.id, action: 'approve' }
+    const forbidden = await client(memberToken).functions.invoke('review-registration', {
+      body: { ...reviewBody, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(forbidden.error?.context instanceof Response && forbidden.error.context.status === 403, 'blocklist-review-owner-only')
+    const review = await client(hostToken).functions.invoke('review-registration', { body: reviewBody })
+    requireValue(review.error?.context instanceof Response && review.error.context.status === 409, 'blocklist-review-conflict')
+    const reviewError = await review.error.context.json()
+    requireValue(reviewError.error?.code === 'blocklist_confirmation_required' &&
+      JSON.stringify(reviewError.error.details) === '{}' &&
+      !JSON.stringify(reviewError).includes(peer.id) && !JSON.stringify(reviewError).includes(member.id),
+      'blocklist-review-anonymous-shape')
+    const unchanged = await admin.from('event_registrations').select('status').eq('id', registration.data.id).single()
+    requireValue(!unchanged.error && unchanged.data?.status === 'pending', 'blocklist-review-warning-no-write')
+    const approved = await client(hostToken).functions.invoke('review-registration', {
+      body: { ...reviewBody, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(!approved.error && approved.data?.registration?.status === 'approved', 'blocklist-review-acknowledged')
+    const repeated = await client(hostToken).functions.invoke('review-registration', {
+      body: { ...reviewBody, acknowledge_blocklist_conflict: true },
+    })
+    requireValue(repeated.error?.context instanceof Response && repeated.error.context.status === 400, 'blocklist-review-repeat-denied')
+
+    // Both pending applicants race: the event lock must serialize the conflict check.
+    result = await admin.from('event_registrations').delete().eq('event_id', scopedEventId).eq('profile_id', member.id)
+    requireValue(!result.error, 'blocklist-review-race-reset-member')
+    result = await admin.from('event_registrations').update({ status: 'pending' })
+      .eq('event_id', scopedEventId).eq('profile_id', peer.id)
+    requireValue(!result.error, 'blocklist-review-race-reset-peer')
+    const pending = await client(memberToken).functions.invoke('create-registration', { body: { event_id: scopedEventId } })
+    requireValue(!pending.error, 'blocklist-review-race-register')
+    const candidates = await admin.from('event_registrations').select('id,status').eq('event_id', scopedEventId)
+    requireValue(!candidates.error && candidates.data?.length === 2 && candidates.data.every(row => row.status === 'pending'),
+      'blocklist-review-race-fixture')
+    const raced = await Promise.all(candidates.data.map(row => client(hostToken).functions.invoke('review-registration', {
+      body: { event_id: scopedEventId, registration_id: row.id, action: 'approve' },
+    })))
+    requireValue(raced.filter(item => !item.error && item.data?.registration?.status === 'approved').length === 1 &&
+      raced.filter(item => item.error?.context instanceof Response && item.error.context.status === 409).length === 1,
+      'blocklist-review-concurrent-serialized')
+    const final = await admin.from('event_registrations').select('status').eq('event_id', scopedEventId)
+    requireValue(!final.error && final.data?.filter(row => row.status === 'approved').length === 1 &&
+      final.data?.filter(row => row.status === 'pending').length === 1, 'blocklist-review-concurrent-state')
+    return ['blocklist-outgoing-conflict-409', 'blocklist-outgoing-conflict-code', 'blocklist-outgoing-conflict-shape',
+      'blocklist-acknowledgement-success', 'blocklist-acknowledgement-event-scoped',
+      'blocklist-status-pending-conflict', 'blocklist-status-approved-conflict', 'blocklist-status-waitlisted-conflict',
+      'blocklist-status-cancellation_pending-conflict', 'blocklist-status-cancellation_rejected-conflict',
+      'blocklist-status-rejected-ignored', 'blocklist-status-cancelled-ignored', 'blocklist-reverse-hidden',
+      'blocklist-direct-write-denied', 'blocklist-review-owner-only', 'blocklist-review-conflict',
+      'blocklist-review-anonymous-shape', 'blocklist-review-warning-no-write', 'blocklist-review-acknowledged',
+      'blocklist-review-repeat-denied', 'blocklist-review-concurrent-serialized', 'blocklist-review-concurrent-state']
+  }
+
+  async function blocklistSeriesScenario(plan: FixturePlan, sessions: string[]) {
+    // Keep this fixture isolated: each rejected acknowledgement path must prove zero partial writes before success.
+    const [host, member] = plan.users
+    const [hostToken, memberToken] = sessions
+    const peer = { id: crypto.randomUUID(), email: `iac.patrol.test.${plan.runId}.series-peer@example.com`, password: `Aa1!${crypto.randomUUID()}` }
+    await adapter.provision(peer, plan.runId)
+    plan.users.push(peer)
+
+    const seriesId = plan.seriesIds[0]
+    const eventIds = plan.eventIds.slice(0, 2)
+    let result = await admin.from('event_series').insert({
+      id: seriesId, creator_id: host.id, title: `Fixture ${plan.runId}`, lifecycle_status: 'draft',
+    })
+    requireValue(!result.error, 'blocklist-series-seed-series')
+    result = await admin.from('events').insert(eventIds.map((id, i) => ({
+      id, creator_id: host.id, title: `Fixture ${plan.runId} blocklist series ${i}`, event_type: 'workshop',
+      start_time: new Date(Date.now() + (7 + i) * 86400000).toISOString(), lifecycle_status: 'draft',
+      publication_status: 'closed', visibility_settings: { type: 'public' }, max_capacity: 10,
+    })))
+    requireValue(!result.error, 'blocklist-series-seed-events')
+    result = await admin.from('event_series_membership').insert(eventIds.map((event_id, i) => ({
+      series_id: seriesId, event_id, position: i + 1,
+    })))
+    requireValue(!result.error, 'blocklist-series-seed-membership')
+    const published = await client(hostToken).functions.invoke('publish-event-series', { body: { series_id: seriesId } })
+    requireValue(!published.error && published.data?.success === true, 'blocklist-series-publish')
+
+    result = await admin.from('event_registrations').insert({ event_id: eventIds[1], profile_id: peer.id, status: 'approved' })
+    requireValue(!result.error, 'blocklist-series-seed-peer')
+    result = await admin.from('blocks').insert({ blocker_id: member.id, blocked_id: peer.id })
+    requireValue(!result.error, 'blocklist-series-seed-outgoing')
+
+    const conflict = await client(memberToken).functions.invoke('register-for-event-series', { body: { series_id: seriesId } })
+    requireValue(conflict.error?.context instanceof Response && conflict.error.context.status === 409, 'blocklist-series-conflict-status')
+    const conflictBody = await conflict.error.context.json()
+    const expectedEventIds = conflictBody.error?.details?.expected_event_ids
+    requireValue(conflictBody.error?.code === 'blocklist_confirmation_required' &&
+      Array.isArray(expectedEventIds) && expectedEventIds.length === eventIds.length, 'blocklist-series-conflict-shape')
+    const afterConflict = await admin.from('event_registrations').select('id').in('event_id', eventIds).eq('profile_id', member.id)
+    const afterConflictSeries = await admin.from('event_series_registrations').select('id').eq('series_id', seriesId).eq('profile_id', member.id)
+    requireValue(!afterConflict.error && afterConflict.data?.length === 0 &&
+      !afterConflictSeries.error && afterConflictSeries.data?.length === 0, 'blocklist-series-conflict-all-or-nothing')
+
+    const stale = await client(memberToken).functions.invoke('register-for-event-series', {
+      body: { series_id: seriesId, acknowledge_blocklist_conflict: true, expected_event_ids: expectedEventIds.slice(0, -1) },
+    })
+    requireValue(stale.error?.context instanceof Response && stale.error.context.status === 409, 'blocklist-series-stale-status')
+    const afterStale = await admin.from('event_registrations').select('id').in('event_id', eventIds).eq('profile_id', member.id)
+    const afterStaleSeries = await admin.from('event_series_registrations').select('id').eq('series_id', seriesId).eq('profile_id', member.id)
+    requireValue(!afterStale.error && afterStale.data?.length === 0 &&
+      !afterStaleSeries.error && afterStaleSeries.data?.length === 0, 'blocklist-series-stale-snapshot-fail-closed')
+
+    const raced = await Promise.all([0, 1].map(() => client(memberToken).functions.invoke('register-for-event-series', {
+      body: { series_id: seriesId, acknowledge_blocklist_conflict: true, expected_event_ids: expectedEventIds },
+    })))
+    requireValue(raced.filter(item => !item.error && item.data?.success === true &&
+      item.data?.event_registration_count === eventIds.length).length === 1, 'blocklist-series-acknowledged-success')
+    requireValue(raced.filter(item => item.error?.context instanceof Response &&
+      item.error.context.status === 409).length === 1, 'blocklist-series-concurrent-retry-rejected')
+    const finalMembers = await admin.from('event_registrations').select('id').in('event_id', eventIds).eq('profile_id', member.id)
+    const finalSeries = await admin.from('event_series_registrations').select('id').eq('series_id', seriesId).eq('profile_id', member.id)
+    requireValue(!finalMembers.error && finalMembers.data?.length === eventIds.length &&
+      !finalSeries.error && finalSeries.data?.length === 1, 'blocklist-series-concurrent-no-duplicates')
+    return ['blocklist-series-conflict-all-or-nothing', 'blocklist-series-stale-snapshot-fail-closed',
+      'blocklist-series-acknowledged-success', 'blocklist-series-concurrent-retry-rejected', 'blocklist-series-concurrent-no-duplicates']
+  }
+
+  async function shareTokenScenario(plan: FixturePlan, sessions: string[]) {
+    const [host] = plan.users
+    const [hostToken] = sessions
+    const eventId = plan.eventIds[0]
+    let result = await admin.from('events').insert({
+      id: eventId, creator_id: host.id, title: `Fixture ${plan.runId} share token`, event_type: 'workshop',
+      start_time: new Date(Date.now() + 7 * 86400000).toISOString(), lifecycle_status: 'registration_open',
+      publication_status: 'published', visibility_settings: { type: 'private' }, max_capacity: 10,
+    })
+    requireValue(!result.error, 'share-token-seed-event')
+
+    const owner = client(hostToken)
+    const ensured = await owner.rpc('ensure_event_share_token', { p_event_id: eventId })
+    requireValue(!ensured.error && typeof ensured.data === 'string' && ensured.data.length === 48, 'share-token-owner-ensure')
+    const first = ensured.data
+
+    const anon = createClient(url, anonKey, { ...options, global: { fetch: boundedFetch } })
+    const visible = await anon.rpc('get_event_by_share_token', { p_token: first })
+    requireValue(!visible.error && visible.data?.length === 1 && visible.data[0]?.id === eventId, 'share-token-anon-valid-read')
+    const hidden = await anon.rpc('get_event_by_share_token', { p_token: '0'.repeat(48) })
+    requireValue(!hidden.error && hidden.data?.length === 0, 'share-token-anon-invalid-hidden')
+
+    const rotated = await owner.rpc('rotate_event_share_token', { p_event_id: eventId })
+    requireValue(!rotated.error && typeof rotated.data === 'string' && rotated.data.length === 48 && rotated.data !== first, 'share-token-owner-rotate')
+    const old = await anon.rpc('get_event_by_share_token', { p_token: first })
+    requireValue(!old.error && old.data?.length === 0, 'share-token-owner-rotate-invalidates-old')
+
+    result = await admin.from('events').update({ visibility_settings: { type: 'public' } }).eq('id', eventId)
+    requireValue(!result.error, 'share-token-hygiene-update')
+    const stale = await anon.rpc('get_event_by_share_token', { p_token: rotated.data })
+    requireValue(!stale.error && stale.data?.length === 0, 'share-token-hygiene-clears-off-private')
+    return ['share-token-owner-ensure', 'share-token-owner-rotate-invalidates-old', 'share-token-anon-valid-read',
+      'share-token-anon-invalid-hidden', 'share-token-hygiene-clears-off-private']
+  }
+
+  const adapter: FixtureAdapter & { blocklistScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; recurrenceScenario(plan: FixturePlan, sessions: string[]): Promise<string[]>; shareTokenScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> } = {
     async provision(user, runId) {
       let created
       try {
@@ -109,6 +397,9 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       return result.data.session.access_token
     },
     scenario,
+    blocklistScenario,
+    recurrenceScenario,
+    shareTokenScenario,
     async owner(id) {
       const result = await admin.auth.admin.getUserById(id)
       if (result.error?.status === 404) return null
@@ -121,6 +412,11 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
     },
     async cleanData(plan) {
       const host = plan.users[0].id
+      if (plan.users.length > 2) {
+        const fixtureUserIds = plan.users.map((user) => user.id)
+        const blocks = await admin.from('blocks').delete().or(`blocker_id.in.(${fixtureUserIds.join(',')}),blocked_id.in.(${fixtureUserIds.join(',')})`)
+        requireValue(!blocks.error, 'cleanup-blocks')
+      }
       // Only known fixture IDs are removed. Unknown foreign-key dependencies fail closed.
       if (plan.seriesIds.length > 0) {
         const series = await admin.from('event_series').delete().in('id', plan.seriesIds).eq('creator_id', host)
@@ -176,11 +472,13 @@ export function createAdapter(url: string, serviceKey: string, anonKey: string, 
       }
     },
   }
+  ;(adapter as typeof adapter & { blocklistSeriesScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> }).blocklistSeriesScenario = blocklistSeriesScenario
+  return adapter
 }
 
 async function main() {
   const command = Deno.args[0]
-  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'cleanup-run', 'command')
+  requireValue(command === 'list' || command === 'verify-series-notification' || command === 'verify-blocklist-conflict' || command === 'verify-blocklist-series-conflict' || command === 'verify-recurrence-behavior' || command === 'verify-share-token' || command === 'cleanup-run', 'command')
   const url = Deno.env.get('SUPABASE_URL')
   requireValue(url === STAGING_URL, 'environment')
   const serviceKey = Deno.env.get('SERVICE_ROLE_KEY')
@@ -204,7 +502,12 @@ async function main() {
     if (!result.ok) Deno.exitCode = 1
     return
   }
-  const result = await runFixture(url, createAdapter(url, serviceKey, anonKey),
+  const adapter = createAdapter(url, serviceKey, anonKey)
+  if (command === 'verify-blocklist-conflict') adapter.scenario = adapter.blocklistScenario
+  if (command === 'verify-blocklist-series-conflict') adapter.scenario = (adapter as typeof adapter & { blocklistSeriesScenario(plan: FixturePlan, sessions: string[]): Promise<string[]> }).blocklistSeriesScenario
+  if (command === 'verify-recurrence-behavior') adapter.scenario = adapter.recurrenceScenario
+  if (command === 'verify-share-token') adapter.scenario = adapter.shareTokenScenario
+  const result = await runFixture(url, adapter,
     (runId) => console.log(JSON.stringify({ runId, stage: 'started' })))
   console.log(JSON.stringify({ ...result, project: 'xdknuxdhyvjgwlcliyqx', role: 'authenticated', aal: 'aal1' }))
   if (!result.ok) Deno.exitCode = 1

@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { parseBlocklistAcknowledgment, blocklistConflictResponse } from '../_shared/blocklist-conflict.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -40,7 +41,9 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'unauthorized', message: 'Invalid or expired token' }, 401)
     }
 
-    const body = (await req.json()) as { event_id?: string; registration_id?: string; action?: string }
+    const body = (await req.json()) as { event_id?: string; registration_id?: string; action?: string; acknowledge_blocklist_conflict?: unknown }
+    const acknowledge = parseBlocklistAcknowledgment(body.acknowledge_blocklist_conflict)
+    if (acknowledge === null) return jsonResponse({ error: 'invalid', message: 'acknowledge_blocklist_conflict must be boolean' }, 400)
     const eventId = body.event_id
     const registrationId = body.registration_id
     const action = body.action
@@ -70,59 +73,23 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'forbidden', message: 'Only the event host can review registrations' }, 403)
     }
 
-    // Fetch the registration
-    const { data: reg, error: regError } = await serviceClient
-      .from('event_registrations')
-      .select('id, status')
-      .eq('id', registrationId)
-      .eq('event_id', eventId)
-      .single()
-
-    if (regError || !reg) {
-      return jsonResponse({ error: 'not_found', message: 'Registration not found' }, 404)
-    }
-
-    if (reg.status !== 'pending' && reg.status !== 'cancellation_pending' && reg.status !== 'cancellation_rejected') {
-      return jsonResponse({ error: 'invalid_status_transition', message: `Cannot ${action} a registration in '${reg.status}' status` }, 400)
-    }
-
-    // Capacity check for approve new registrations (ignore for cancellation approvals)
-    if (action === 'approve' && reg.status === 'pending' && event.max_capacity) {
-      const { count: approvedCount } = await serviceClient
-        .from('event_registrations')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_id', eventId)
-        .eq('status', 'approved')
-
-      if ((approvedCount ?? 0) >= event.max_capacity) {
-        return jsonResponse({ error: 'capacity_reached', message: 'Cannot approve more registrations, capacity reached' }, 400)
-      }
-    }
-
-    let newStatus: string
-    if (reg.status === 'cancellation_pending') {
-      // Approving cancellation -> cancelled, Rejecting cancellation -> cancellation_rejected
-      newStatus = action === 'approve' ? 'cancelled' : 'cancellation_rejected'
-    } else if (reg.status === 'cancellation_rejected' && action === 'reopen') {
-      newStatus = 'cancellation_pending'
-    } else {
-      // Approving registration -> approved, Rejecting registration -> rejected
-      newStatus = action === 'approve' ? 'approved' : 'rejected'
-    }
-
+    // State, capacity, conflict check and write share one event-row lock.
     const { data: updated, error: updateError } = await serviceClient
-      .from('event_registrations')
-      .update({
-        status: newStatus,
-        reviewed_by: user.id,
-        reviewed_at: new Date().toISOString(),
-      })
-      .eq('id', registrationId)
-      .select('id, status, reviewed_by, reviewed_at')
-      .single()
-
+      .rpc('review_event_registration_checked', {
+        p_event_id: eventId,
+        p_registration_id: registrationId,
+        p_host_id: user.id,
+        p_action: action,
+        p_acknowledge_blocklist_conflict: acknowledge,
+      }).single()
     if (updateError) {
-      return jsonResponse({ error: 'db_error', message: updateError.message }, 500)
+      const conflict = blocklistConflictResponse(updateError)
+      if (conflict) return jsonResponse(conflict, 409)
+      const code = updateError.message
+      if (['not_found', 'forbidden', 'registration_blocked', 'capacity_reached', 'invalid_status_transition'].includes(code)) {
+        return jsonResponse({ error: code, message: 'This registration cannot be updated.' }, code === 'not_found' ? 404 : code === 'forbidden' || code === 'registration_blocked' ? 403 : 400)
+      }
+      return jsonResponse({ error: 'db_error', message: 'Unable to update registration' }, 500)
     }
 
     return jsonResponse({ success: true, registration: updated }, 200)

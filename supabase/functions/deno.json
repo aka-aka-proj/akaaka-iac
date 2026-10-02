@@ -6,7 +6,7 @@
   },
   "importMap": "./import_map.json",
   "tasks": {
-    "test": "deno test --allow-env --allow-net _shared/*_test.ts get-user-analytics/*_test.ts",
-    "coverage": "deno test --allow-env --allow-net --coverage=coverage _shared/*_test.ts get-user-analytics/*_test.ts && deno coverage coverage --lcov --output=coverage.lcov"
+    "test": "deno test --allow-env --allow-net --allow-read=.,../../.github/workflows _shared/*_test.ts get-user-analytics/*_test.ts",
+    "coverage": "deno test --allow-env --allow-net --allow-read=.,../../.github/workflows --coverage=coverage _shared/*_test.ts get-user-analytics/*_test.ts && deno coverage coverage --lcov --output=coverage.lcov"
   }
 }
