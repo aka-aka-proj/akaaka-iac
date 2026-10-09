@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "generated_at": "2026-10-02T05:49:52Z",
+  "generated_at": "2026-10-09T06:18:49Z",
   "repos": {
     "iac": {
       "result": "released",
@@ -11,7 +11,12 @@
       "class": "post-merge-failed",
       "run_id": "",
       "detail": "",
-      "pending_expands": []
+      "pending_expands": [
+        {
+          "pr": 185,
+          "sha": ""
+        }
+      ]
     },
     "frontend": {
       "result": "skipped-upstream",
