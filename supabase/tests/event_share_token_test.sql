@@ -2,7 +2,8 @@ BEGIN;
 
 -- Share token contract tests（ADR-022，獨立表設計）
 -- 結構性驗證：definer/search_path/grants/條件檢查/token 表存取封鎖/trigger。
--- 行為測試（token 有效與否）依賴 auth session context，由 staging synthetic fixture 驗證。
+-- Local role/claims behavior: event_share_token_runtime_test.sql.
+-- Hosted auth-session behavior remains separately verified by the staging synthetic fixture.
 
 SELECT plan(32);
 
